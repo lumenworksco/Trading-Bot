@@ -24,8 +24,10 @@ Set your environment variables:
 export ALPACA_API_KEY="your-api-key"
 export ALPACA_SECRET_KEY="your-secret-key"
 export ALPACA_LIVE=false          # true for live trading
-export TELEGRAM_TOKEN=""          # optional
-export TELEGRAM_CHAT_ID=""        # optional
+export WHATSAPP_ENABLED=false             # optional
+export WHATSAPP_ACCESS_TOKEN=""           # optional
+export WHATSAPP_PHONE_NUMBER_ID=""        # optional
+export WHATSAPP_RECIPIENT_NUMBER=""       # optional
 ```
 
 Run:
@@ -107,7 +109,7 @@ trading_bot/
 | `ML_FILTER` | `true` | Enable ML signal filter |
 | `VIX_SCALING` | `true` | Scale risk by VIX level |
 | `NEWS_FILTER` | `false` | Enable news sentiment filter |
-| `TELEGRAM_ENABLED` | `false` | Enable Telegram alerts |
+| `WHATSAPP_ENABLED` | `false` | Enable WhatsApp alerts |
 | `WEB_DASHBOARD` | `false` | Enable web dashboard |
 | `SCAN_INTERVAL` | `60` | Seconds between scans |
 

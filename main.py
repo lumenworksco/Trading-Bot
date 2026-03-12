@@ -373,7 +373,7 @@ def _process_single_signal(
         ws_monitor.subscribe(signal.symbol)
 
     # V3: Telegram notification
-    if notifications and config.TELEGRAM_ENABLED:
+    if notifications and config.WHATSAPP_ENABLED:
         try:
             notifications.notify_trade_opened(trade)
         except Exception as e:
@@ -400,7 +400,7 @@ def sync_positions_with_broker(risk: RiskManager, now: datetime, ws_monitor=None
             # V3: Unsubscribe from WS and notify
             if ws_monitor:
                 ws_monitor.unsubscribe(symbol)
-            if notifications and config.TELEGRAM_ENABLED:
+            if notifications and config.WHATSAPP_ENABLED:
                 try:
                     notifications.notify_trade_closed(trade)
                 except Exception:
@@ -607,7 +607,7 @@ def main():
         features.append("Gap")
     if config.USE_RS_FILTER:
         features.append("RS")
-    if config.TELEGRAM_ENABLED:
+    if config.WHATSAPP_ENABLED:
         features.append("TG")
     if config.WEB_DASHBOARD_ENABLED:
         features.append("Web")
@@ -706,7 +706,7 @@ def main():
                         try:
                             logger.info("Sunday: retraining ML models...")
                             ml_filter.retrain_all()
-                            if notifications and config.TELEGRAM_ENABLED:
+                            if notifications and config.WHATSAPP_ENABLED:
                                 notifications.notify_ml_retrain(ml_filter._active)
                         except Exception as e:
                             logger.error(f"ML retrain failed: {e}")
@@ -749,7 +749,7 @@ def main():
                         logger.error(f"Failed to update strategy weights: {e}")
 
                 # V4: VIX alert notifications
-                if config.VIX_RISK_SCALING_ENABLED and notifications and config.TELEGRAM_ENABLED:
+                if config.VIX_RISK_SCALING_ENABLED and notifications and config.WHATSAPP_ENABLED:
                     try:
                         from risk import get_vix_level as _gvl
                         vix = _gvl()
@@ -960,7 +960,7 @@ def main():
 
                     # Check circuit breaker
                     if risk.check_circuit_breaker():
-                        if notifications and config.TELEGRAM_ENABLED:
+                        if notifications and config.WHATSAPP_ENABLED:
                             try:
                                 notifications.notify_circuit_breaker(risk.day_pnl)
                             except Exception:
@@ -975,7 +975,7 @@ def main():
                     logger.info(f"Day summary: {summary}")
 
                     # V3: Telegram daily summary
-                    if notifications and config.TELEGRAM_ENABLED:
+                    if notifications and config.WHATSAPP_ENABLED:
                         try:
                             notifications.notify_daily_summary(summary, risk.current_equity)
                         except Exception as e:
@@ -1013,7 +1013,7 @@ def main():
                         current_analytics = analytics_mod.compute_analytics()
 
                         # V3: Drawdown warning
-                        if current_analytics and notifications and config.TELEGRAM_ENABLED:
+                        if current_analytics and notifications and config.WHATSAPP_ENABLED:
                             dd = current_analytics.get("max_drawdown", 0)
                             if dd > 0.05:
                                 try:
@@ -1070,7 +1070,7 @@ def _handle_ws_close(symbol: str, reason: str, risk: RiskManager, ws_monitor):
         risk.close_trade(symbol, trade.entry_price, now_et(), exit_reason=reason)
         ws_monitor.unsubscribe(symbol)
 
-        if notifications and config.TELEGRAM_ENABLED:
+        if notifications and config.WHATSAPP_ENABLED:
             try:
                 notifications.notify_trade_closed(trade)
             except Exception:
@@ -1263,7 +1263,7 @@ async def _async_broker_sync(risk, ws_monitor):
                         logger.error(f"[async] Account update failed: {e}")
 
                 if risk.check_circuit_breaker():
-                    if notifications and config.TELEGRAM_ENABLED:
+                    if notifications and config.WHATSAPP_ENABLED:
                         try:
                             notifications.notify_circuit_breaker(risk.day_pnl)
                         except Exception:
@@ -1380,7 +1380,7 @@ async def _async_daily_tasks(
                     logger.error(f"[async] Allocation update failed: {e}")
 
             # VIX alerts
-            if config.VIX_RISK_SCALING_ENABLED and notifications and config.TELEGRAM_ENABLED:
+            if config.VIX_RISK_SCALING_ENABLED and notifications and config.WHATSAPP_ENABLED:
                 try:
                     from risk import get_vix_level as _gvl
                     vix = _gvl()
@@ -1404,7 +1404,7 @@ async def _async_daily_tasks(
                 summary = risk.get_day_summary()
                 print_day_summary(summary)
                 logger.info(f"Day summary: {summary}")
-                if notifications and config.TELEGRAM_ENABLED:
+                if notifications and config.WHATSAPP_ENABLED:
                     try:
                         notifications.notify_daily_summary(summary, risk.current_equity)
                     except Exception:
@@ -1428,7 +1428,7 @@ async def _async_daily_tasks(
             # Analytics
             try:
                 current_analytics = analytics_mod.compute_analytics()
-                if current_analytics and notifications and config.TELEGRAM_ENABLED:
+                if current_analytics and notifications and config.WHATSAPP_ENABLED:
                     dd = current_analytics.get("max_drawdown", 0)
                     if dd > 0.05:
                         try:
@@ -1549,7 +1549,7 @@ async def async_main():
     supervisor = TaskSupervisor()
 
     # Optional crash notification via Telegram
-    if notifications and config.TELEGRAM_ENABLED:
+    if notifications and config.WHATSAPP_ENABLED:
         async def _crash_notify(name, exc, count):
             try:
                 notifications.send_message(f"Task '{name}' crashed (#{count}): {exc}")

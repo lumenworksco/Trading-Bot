@@ -177,10 +177,11 @@ USE_RS_FILTER = os.getenv("USE_RS_FILTER", "true") == "true"
 RS_LONG_THRESHOLD = 0.2              # Long only if RS > 0.2
 RS_SHORT_THRESHOLD = -0.2            # Short only if RS < -0.2
 
-# --- V3: Telegram Notifications ---
-TELEGRAM_ENABLED = os.getenv("TELEGRAM_ENABLED", "false") == "true"
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
-TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
+# --- V3: WhatsApp Notifications (via Meta Cloud API) ---
+WHATSAPP_ENABLED = os.getenv("WHATSAPP_ENABLED", "false") == "true"
+WHATSAPP_ACCESS_TOKEN = os.getenv("WHATSAPP_ACCESS_TOKEN", "")
+WHATSAPP_PHONE_NUMBER_ID = os.getenv("WHATSAPP_PHONE_NUMBER_ID", "")
+WHATSAPP_RECIPIENT_NUMBER = os.getenv("WHATSAPP_RECIPIENT_NUMBER", "")
 
 # --- V3: Web Dashboard ---
 WEB_DASHBOARD_ENABLED = os.getenv("WEB_DASHBOARD_ENABLED", "true") == "true"
