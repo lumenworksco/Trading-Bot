@@ -1,0 +1,152 @@
+"""Performance analytics — Sharpe, Sortino, drawdown, attribution."""
+
+import logging
+import math
+from datetime import datetime, timedelta
+
+import numpy as np
+
+import config
+import database
+
+logger = logging.getLogger(__name__)
+
+
+def sharpe_ratio(daily_returns: list[float], risk_free_rate: float = 0.045) -> float:
+    """Annualized Sharpe ratio from daily P&L percentages.
+
+    Args:
+        daily_returns: List of daily return percentages (e.g., 0.01 = +1%)
+        risk_free_rate: Annual risk-free rate (default 4.5%)
+    """
+    if len(daily_returns) < 2:
+        return 0.0
+
+    arr = np.array(daily_returns)
+    daily_rf = risk_free_rate / 252
+    excess = arr - daily_rf
+    mean_excess = np.mean(excess)
+    std = np.std(excess, ddof=1)
+
+    if std == 0:
+        return 0.0
+
+    return float(mean_excess / std * np.sqrt(252))
+
+
+def sortino_ratio(daily_returns: list[float], risk_free_rate: float = 0.045) -> float:
+    """Sortino ratio — like Sharpe but only penalizes downside volatility."""
+    if len(daily_returns) < 2:
+        return 0.0
+
+    arr = np.array(daily_returns)
+    daily_rf = risk_free_rate / 252
+    excess = arr - daily_rf
+    mean_excess = np.mean(excess)
+
+    # Downside deviation: only negative returns
+    downside = excess[excess < 0]
+    if len(downside) == 0:
+        return float('inf') if mean_excess > 0 else 0.0
+
+    downside_std = np.std(downside, ddof=1)
+    if downside_std == 0:
+        return 0.0
+
+    return float(mean_excess / downside_std * np.sqrt(252))
+
+
+def profit_factor(trades: list[dict]) -> float:
+    """Gross profit / gross loss."""
+    gross_profit = sum(t["pnl"] for t in trades if t.get("pnl", 0) > 0)
+    gross_loss = abs(sum(t["pnl"] for t in trades if t.get("pnl", 0) < 0))
+
+    if gross_loss == 0:
+        return float('inf') if gross_profit > 0 else 0.0
+
+    return gross_profit / gross_loss
+
+
+def max_drawdown(portfolio_values: list[float]) -> float:
+    """Largest peak-to-trough decline as a percentage."""
+    if len(portfolio_values) < 2:
+        return 0.0
+
+    arr = np.array(portfolio_values)
+    peak = arr[0]
+    max_dd = 0.0
+
+    for val in arr:
+        if val > peak:
+            peak = val
+        dd = (peak - val) / peak if peak > 0 else 0.0
+        max_dd = max(max_dd, dd)
+
+    return max_dd
+
+
+def win_rate(trades: list[dict]) -> float:
+    """Percentage of winning trades."""
+    if not trades:
+        return 0.0
+    winners = sum(1 for t in trades if t.get("pnl", 0) > 0)
+    return winners / len(trades)
+
+
+def benchmark_comparison(daily_returns: list[float], spy_returns: list[float]) -> float:
+    """Bot return minus SPY return over the same period."""
+    if not daily_returns or not spy_returns:
+        return 0.0
+
+    bot_total = np.prod([1 + r for r in daily_returns]) - 1
+    spy_total = np.prod([1 + r for r in spy_returns]) - 1
+    return float(bot_total - spy_total)
+
+
+def strategy_attribution(trades: list[dict]) -> dict:
+    """P&L attribution per strategy.
+
+    Returns: {'ORB': {'trades': N, 'pnl': X, 'win_rate': Y}, ...}
+    """
+    result = {}
+    for t in trades:
+        strat = t.get("strategy", "UNKNOWN")
+        if strat not in result:
+            result[strat] = {"trades": 0, "winners": 0, "pnl": 0.0}
+        result[strat]["trades"] += 1
+        result[strat]["pnl"] += t.get("pnl", 0)
+        if t.get("pnl", 0) > 0:
+            result[strat]["winners"] += 1
+
+    for strat, data in result.items():
+        data["win_rate"] = data["winners"] / data["trades"] if data["trades"] > 0 else 0.0
+
+    return result
+
+
+def compute_analytics() -> dict:
+    """Compute all analytics from DB data. Returns dict for dashboard."""
+    # Get recent trades and daily data
+    trades_7d = database.get_recent_trades(days=7)
+    trades_all = database.get_all_trades()
+    daily_returns = database.get_daily_pnl_series(days=30)
+    portfolio_vals = database.get_portfolio_values(days=30)
+
+    # Weekly P&L
+    week_pnl = sum(t.get("pnl", 0) for t in trades_7d)
+    week_pnl_pct = sum(daily_returns[-5:]) if len(daily_returns) >= 5 else sum(daily_returns)
+
+    result = {
+        "sharpe_7d": sharpe_ratio(daily_returns[-7:]) if len(daily_returns) >= 3 else 0.0,
+        "sharpe_30d": sharpe_ratio(daily_returns) if len(daily_returns) >= 5 else 0.0,
+        "sortino_7d": sortino_ratio(daily_returns[-7:]) if len(daily_returns) >= 3 else 0.0,
+        "win_rate": win_rate(trades_7d),
+        "profit_factor": profit_factor(trades_7d),
+        "max_drawdown": max_drawdown(portfolio_vals) if portfolio_vals else 0.0,
+        "week_pnl": week_pnl,
+        "week_pnl_pct": week_pnl_pct,
+        "strategy_breakdown": strategy_attribution(trades_7d),
+        "total_trades_7d": len(trades_7d),
+        "total_trades_all": len(trades_all),
+    }
+    return result

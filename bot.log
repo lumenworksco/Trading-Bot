@@ -207,3 +207,97 @@
 2026-03-12 17:48:23,989 [INFO] risk: Trade closed: META (VWAP) P&L=$+0.00 (0.0%)
 2026-03-12 17:48:23,990 [INFO] __main__: Position META no longer at broker — marking closed
 2026-03-12 18:10:51,454 [INFO] strategies: Market regime: BEARISH (SPY=668.86, EMA=682.25)
+2026-03-12 20:14:34,504 [INFO] database: Database initialized
+2026-03-12 20:14:34,505 [INFO] database: Migrated state.json to SQLite, backup at state.json.bak
+2026-03-12 20:14:35,678 [INFO] risk: Restored 0 open trades from database
+2026-03-12 20:14:35,678 [INFO] earnings: Loading earnings calendar for 128 symbols...
+2026-03-12 20:14:37,117 [ERROR] yfinance: HTTP Error 404: {"quoteSummary":{"result":null,"error":{"code":"Not Found","description":"No fundamentals data found for symbol: SPY"}}}
+2026-03-12 20:14:37,532 [ERROR] yfinance: HTTP Error 404: {"quoteSummary":{"result":null,"error":{"code":"Not Found","description":"No fundamentals data found for symbol: QQQ"}}}
+2026-03-12 20:14:42,177 [ERROR] yfinance: HTTP Error 404: {"quoteSummary":{"result":null,"error":{"code":"Not Found","description":"No fundamentals data found for symbol: SQ"}}}
+2026-03-12 20:14:43,817 [ERROR] yfinance: HTTP Error 404: {"quoteSummary":{"result":null,"error":{"code":"Not Found","description":"No fundamentals data found for symbol: IWM"}}}
+2026-03-12 20:14:44,231 [ERROR] yfinance: HTTP Error 404: {"quoteSummary":{"result":null,"error":{"code":"Not Found","description":"No fundamentals data found for symbol: DIA"}}}
+2026-03-12 20:14:44,627 [ERROR] yfinance: HTTP Error 404: {"quoteSummary":{"result":null,"error":{"code":"Not Found","description":"No fundamentals data found for symbol: XLF"}}}
+2026-03-12 20:14:45,027 [ERROR] yfinance: HTTP Error 404: {"quoteSummary":{"result":null,"error":{"code":"Not Found","description":"No fundamentals data found for symbol: XLE"}}}
+2026-03-12 20:14:45,449 [ERROR] yfinance: HTTP Error 404: {"quoteSummary":{"result":null,"error":{"code":"Not Found","description":"No fundamentals data found for symbol: XLK"}}}
+2026-03-12 20:14:46,062 [ERROR] yfinance: HTTP Error 404: {"quoteSummary":{"result":null,"error":{"code":"Not Found","description":"No fundamentals data found for symbol: XLV"}}}
+2026-03-12 20:14:46,645 [ERROR] yfinance: HTTP Error 404: {"quoteSummary":{"result":null,"error":{"code":"Not Found","description":"No fundamentals data found for symbol: ARKK"}}}
+2026-03-12 20:14:47,219 [ERROR] yfinance: HTTP Error 404: {"quoteSummary":{"result":null,"error":{"code":"Not Found","description":"No fundamentals data found for symbol: GLD"}}}
+2026-03-12 20:14:47,628 [ERROR] yfinance: HTTP Error 404: {"quoteSummary":{"result":null,"error":{"code":"Not Found","description":"No fundamentals data found for symbol: SLV"}}}
+2026-03-12 20:14:48,142 [ERROR] yfinance: HTTP Error 404: {"quoteSummary":{"result":null,"error":{"code":"Not Found","description":"No fundamentals data found for symbol: TLT"}}}
+2026-03-12 20:14:51,367 [ERROR] yfinance: HTTP Error 404: {"quoteSummary":{"result":null,"error":{"code":"Not Found","description":"Quote not found for symbol: ANSS"}}}
+2026-03-12 20:14:52,917 [ERROR] yfinance: HTTP Error 404: {"quoteSummary":{"result":null,"error":{"code":"Not Found","description":"No fundamentals data found for symbol: XLB"}}}
+2026-03-12 20:14:53,435 [ERROR] yfinance: HTTP Error 404: {"quoteSummary":{"result":null,"error":{"code":"Not Found","description":"No fundamentals data found for symbol: XLI"}}}
+2026-03-12 20:14:53,839 [ERROR] yfinance: HTTP Error 404: {"quoteSummary":{"result":null,"error":{"code":"Not Found","description":"No fundamentals data found for symbol: XLU"}}}
+2026-03-12 20:14:54,239 [ERROR] yfinance: HTTP Error 404: {"quoteSummary":{"result":null,"error":{"code":"Not Found","description":"No fundamentals data found for symbol: XLRE"}}}
+2026-03-12 20:14:54,640 [ERROR] yfinance: HTTP Error 404: {"quoteSummary":{"result":null,"error":{"code":"Not Found","description":"No fundamentals data found for symbol: XLC"}}}
+2026-03-12 20:14:55,039 [ERROR] yfinance: HTTP Error 404: {"quoteSummary":{"result":null,"error":{"code":"Not Found","description":"No fundamentals data found for symbol: XLP"}}}
+2026-03-12 20:14:55,445 [ERROR] yfinance: HTTP Error 404: {"quoteSummary":{"result":null,"error":{"code":"Not Found","description":"No fundamentals data found for symbol: XLY"}}}
+2026-03-12 20:14:55,849 [ERROR] yfinance: HTTP Error 404: {"quoteSummary":{"result":null,"error":{"code":"Not Found","description":"No fundamentals data found for symbol: SOXX"}}}
+2026-03-12 20:14:56,272 [ERROR] yfinance: HTTP Error 404: {"quoteSummary":{"result":null,"error":{"code":"Not Found","description":"No fundamentals data found for symbol: SMH"}}}
+2026-03-12 20:14:56,679 [ERROR] yfinance: HTTP Error 404: {"quoteSummary":{"result":null,"error":{"code":"Not Found","description":"No fundamentals data found for symbol: IBB"}}}
+2026-03-12 20:14:57,265 [ERROR] yfinance: HTTP Error 404: {"quoteSummary":{"result":null,"error":{"code":"Not Found","description":"No fundamentals data found for symbol: SOXL"}}}
+2026-03-12 20:14:57,662 [ERROR] yfinance: HTTP Error 404: {"quoteSummary":{"result":null,"error":{"code":"Not Found","description":"No fundamentals data found for symbol: TQQQ"}}}
+2026-03-12 20:14:58,067 [ERROR] yfinance: HTTP Error 404: {"quoteSummary":{"result":null,"error":{"code":"Not Found","description":"No fundamentals data found for symbol: SPXL"}}}
+2026-03-12 20:14:58,482 [ERROR] yfinance: HTTP Error 404: {"quoteSummary":{"result":null,"error":{"code":"Not Found","description":"No fundamentals data found for symbol: UVXY"}}}
+2026-03-12 20:14:58,887 [ERROR] yfinance: HTTP Error 404: {"quoteSummary":{"result":null,"error":{"code":"Not Found","description":"No fundamentals data found for symbol: SQQQ"}}}
+2026-03-12 20:14:59,282 [ERROR] yfinance: HTTP Error 404: {"quoteSummary":{"result":null,"error":{"code":"Not Found","description":"No fundamentals data found for symbol: TNA"}}}
+2026-03-12 20:14:59,672 [ERROR] yfinance: HTTP Error 404: {"quoteSummary":{"result":null,"error":{"code":"Not Found","description":"No fundamentals data found for symbol: FAS"}}}
+2026-03-12 20:15:00,080 [ERROR] yfinance: HTTP Error 404: {"quoteSummary":{"result":null,"error":{"code":"Not Found","description":"No fundamentals data found for symbol: FAZ"}}}
+2026-03-12 20:15:00,479 [ERROR] yfinance: HTTP Error 404: {"quoteSummary":{"result":null,"error":{"code":"Not Found","description":"No fundamentals data found for symbol: LABU"}}}
+2026-03-12 20:15:00,894 [ERROR] yfinance: HTTP Error 404: {"quoteSummary":{"result":null,"error":{"code":"Not Found","description":"No fundamentals data found for symbol: LABD"}}}
+2026-03-12 20:15:04,998 [INFO] earnings: Earnings filter: 2 symbols excluded from trading
+2026-03-12 20:15:04,999 [INFO] correlation: Loading correlation data for 128 symbols...
+2026-03-12 20:15:07,075 [ERROR] yfinance: Failed to get ticker 'GS' reason: Failed to perform, curl: (6) getaddrinfo() thread failed to start. See https://curl.se/libcurl/c/libcurl-errors.html first for more details.
+2026-03-12 20:15:07,109 [ERROR] yfinance: Failed to get ticker 'JD' reason: Failed to perform, curl: (6) Could not resolve host: query2.finance.yahoo.com. See https://curl.se/libcurl/c/libcurl-errors.html first for more details.
+2026-03-12 20:15:07,109 [ERROR] yfinance: $JD: possibly delisted; no timezone found
+2026-03-12 20:15:07,110 [ERROR] yfinance: Failed to get ticker 'RBLX' reason: Failed to perform, curl: (6) getaddrinfo() thread failed to start. See https://curl.se/libcurl/c/libcurl-errors.html first for more details.
+2026-03-12 20:15:07,110 [ERROR] yfinance: $RBLX: possibly delisted; no timezone found
+2026-03-12 20:15:07,125 [ERROR] yfinance: Failed to get ticker 'CMG' reason: Failed to perform, curl: (6) Could not resolve host: query2.finance.yahoo.com. See https://curl.se/libcurl/c/libcurl-errors.html first for more details.
+2026-03-12 20:15:07,125 [ERROR] yfinance: $CMG: possibly delisted; no timezone found
+2026-03-12 20:15:07,126 [ERROR] yfinance: Failed to get ticker 'TSLA' reason: Failed to perform, curl: (6) getaddrinfo() thread failed to start. See https://curl.se/libcurl/c/libcurl-errors.html first for more details.
+2026-03-12 20:15:07,126 [ERROR] yfinance: $TSLA: possibly delisted; no timezone found
+2026-03-12 20:15:07,127 [ERROR] yfinance: Failed to get ticker 'BILL' reason: Failed to perform, curl: (6) getaddrinfo() thread failed to start. See https://curl.se/libcurl/c/libcurl-errors.html first for more details.
+2026-03-12 20:15:07,127 [ERROR] yfinance: $BILL: possibly delisted; no timezone found
+2026-03-12 20:15:07,173 [ERROR] yfinance: Failed to get ticker 'ANSS' reason: Failed to perform, curl: (6) getaddrinfo() thread failed to start. See https://curl.se/libcurl/c/libcurl-errors.html first for more details.
+2026-03-12 20:15:07,174 [ERROR] yfinance: $ANSS: possibly delisted; no timezone found
+2026-03-12 20:15:07,226 [ERROR] yfinance: $SQ: possibly delisted; no timezone found
+2026-03-12 20:15:07,892 [ERROR] yfinance: 
+21 Failed downloads:
+2026-03-12 20:15:07,893 [ERROR] yfinance: ['JD', 'RBLX', 'CMG', 'TSLA', 'BILL', 'ANSS', 'SQ']: possibly delisted; no timezone found
+2026-03-12 20:15:07,893 [ERROR] yfinance: ['ZS', 'CVX', 'SNAP', 'XLC', 'JPM', 'OKTA', 'XLU', 'UBER', 'ENPH', 'LABD', 'CFLT', 'SNOW', 'PYPL', 'XLP']: OperationalError('unable to open database file')
+2026-03-12 20:15:07,930 [WARNING] correlation: Not enough data for correlation calculation
+2026-03-12 20:15:08,374 [INFO] strategies.regime: Market regime: BEARISH (SPY=667.52, EMA=682.12)
+2026-03-12 20:15:55,893 [INFO] execution: Order submitted: BUY 9 SMH (VWAP) order_id=f55ea96c-6e3f-4812-aa5a-29358370385e
+2026-03-12 20:15:55,895 [INFO] risk: Trade opened: BUY 9 SMH @ 387.88 (VWAP/day) TP=390.25 SL=386.88
+2026-03-12 20:15:56,009 [INFO] risk: Trade closed: SMH (VWAP) P&L=$+0.00 (0.0%) reason=broker_sync
+2026-03-12 20:15:56,009 [INFO] __main__: Position SMH no longer at broker — marking closed
+2026-03-12 20:19:55,962 [INFO] execution: Order submitted: BUY 21 DASH (VWAP) order_id=5484a9ac-2df1-4ad3-be8f-520fca8f1c10
+2026-03-12 20:19:55,964 [INFO] risk: Trade opened: BUY 21 DASH @ 163.10 (VWAP/day) TP=165.14 SL=162.15
+2026-03-12 20:19:56,070 [INFO] risk: Trade closed: DASH (VWAP) P&L=$+0.00 (0.0%) reason=broker_sync
+2026-03-12 20:19:56,071 [INFO] __main__: Position DASH no longer at broker — marking closed
+2026-03-12 20:31:59,374 [INFO] execution: Order submitted: BUY 143 CHWY (VWAP) order_id=3fa0a409-c66d-4149-99b8-60d5999a681a
+2026-03-12 20:31:59,375 [INFO] risk: Trade opened: BUY 143 CHWY @ 24.92 (VWAP/day) TP=25.33 SL=24.75
+2026-03-12 20:31:59,485 [INFO] risk: Trade closed: CHWY (VWAP) P&L=$+0.00 (0.0%) reason=broker_sync
+2026-03-12 20:31:59,485 [INFO] __main__: Position CHWY no longer at broker — marking closed
+2026-03-12 20:34:58,226 [INFO] database: Database initialized
+2026-03-12 20:34:59,033 [INFO] risk: Restored 0 open trades from database
+2026-03-12 20:34:59,034 [INFO] earnings: Loading earnings calendar for 128 symbols...
+2026-03-12 20:35:17,098 [INFO] earnings: Earnings filter: 2 symbols excluded (32 ETFs auto-skipped)
+2026-03-12 20:35:17,099 [INFO] correlation: Loading correlation data for 128 symbols...
+2026-03-12 20:35:20,945 [WARNING] correlation: Not enough data for correlation calculation
+2026-03-12 20:35:21,126 [INFO] strategies.regime: Market regime: BEARISH (SPY=668.31, EMA=682.20)
+2026-03-12 20:38:34,614 [INFO] execution: Order submitted: BUY 47 W (VWAP) order_id=3592232c-f741-47f3-8300-afd9e36cd64d
+2026-03-12 20:38:34,614 [INFO] risk: Trade opened: BUY 47 W @ 74.56 (VWAP/day) TP=76.58 SL=73.87
+2026-03-12 20:38:34,712 [INFO] risk: Trade closed: W (VWAP) P&L=$+0.00 (0.0%) reason=broker_sync
+2026-03-12 20:38:34,712 [INFO] __main__: Position W no longer at broker — marking closed
+2026-03-12 20:42:46,637 [INFO] database: Database initialized
+2026-03-12 20:42:47,469 [INFO] risk: Restored 0 open trades from database
+2026-03-12 20:42:47,470 [INFO] earnings: Loading earnings calendar for 128 symbols...
+2026-03-12 20:43:02,468 [INFO] earnings: Earnings filter: 2 symbols excluded (32 ETFs auto-skipped)
+2026-03-12 20:43:02,469 [INFO] correlation: Loading correlation data for 128 symbols...
+2026-03-12 20:43:03,741 [INFO] correlation: Correlation matrix loaded: 57 symbols
+2026-03-12 20:43:03,855 [INFO] strategies.regime: Market regime: BEARISH (SPY=667.15, EMA=682.09)
+2026-03-12 20:44:54,933 [INFO] execution: Order submitted: BUY 75 TQQQ (VWAP) order_id=ee944f1d-da4a-4fb9-b016-a723b9a9d1c7
+2026-03-12 20:44:54,934 [INFO] risk: Trade opened: BUY 75 TQQQ @ 46.98 (VWAP/day) TP=47.42 SL=46.82
+2026-03-12 20:44:55,040 [INFO] risk: Trade closed: TQQQ (VWAP) P&L=$+0.00 (0.0%) reason=broker_sync
+2026-03-12 20:44:55,042 [INFO] __main__: Position TQQQ no longer at broker — marking closed

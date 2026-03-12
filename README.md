@@ -1,6 +1,6 @@
-# Algo Trading Bot
+# Algo Trading Bot V2
 
-Algorithmic trading bot using Alpaca API with two strategies: Opening Range Breakout (ORB) and VWAP Mean Reversion.
+Algorithmic trading bot using Alpaca API with three strategies: Opening Range Breakout (ORB), VWAP Mean Reversion, and Catalyst Momentum.
 
 ## Quick Start (< 5 minutes)
 
@@ -28,47 +28,92 @@ export ALPACA_API_SECRET="your-api-secret"
 python main.py
 ```
 
-The bot starts in **paper mode** by default. To trade live (use with caution):
+Paper mode by default. For live trading: `python main.py --live`
+
+### 5. Run Backtest
 
 ```bash
-export ALPACA_LIVE=true
+python main.py --backtest
 ```
+
+## V2 Features
+
+### Three Strategies
+- **ORB**: Trades breakouts above 30-min opening range. 3:1 R/R. Exits by 3:45 PM.
+- **VWAP**: Buys at lower VWAP band with RSI confirmation. 45-min time stop.
+- **Momentum**: Trades post-catalyst continuation. Holds 1-5 days. Max 1 position.
+
+### 150 Symbol Universe
+- 50 core liquid stocks/ETFs + 100 extended (growth, sector ETFs, mid-caps)
+- Leveraged ETFs restricted to VWAP strategy only
+
+### Smart Filters
+- Earnings filter (skips trades within 48h of earnings)
+- Correlation filter (skips if >75% correlated with open position)
+
+### ATR-Based Position Sizing
+- Risks 1% of portfolio per trade based on stop distance
+- Hard cap: 6% per position. Bearish regime cuts size 40%.
+
+### SQLite Database (bot.db)
+- All trades, signals, daily snapshots, backtest results logged
+- Open positions persisted (replaces state.json)
+
+### Backtesting Engine
+- 6 months hourly data via yfinance
+- Slippage + commission simulation. Results saved to DB.
+
+### Performance Dashboard
+- Sharpe, Sortino, profit factor, max drawdown
+- Strategy attribution, week P&L, earnings exclusion count
 
 ## Configuration
 
-All settings are in `config.py` or controllable via environment variables:
-
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `ALPACA_API_KEY` | (required) | Your Alpaca API key |
-| `ALPACA_API_SECRET` | (required) | Your Alpaca API secret |
-| `ALPACA_LIVE` | `false` | Set to `true` for live trading |
-| `ALLOW_SHORT` | `false` | Set to `true` to enable short selling |
-
-## Strategies
-
-- **ORB (Opening Range Breakout)**: Trades breakouts above the first 30-minute range. Runs 10:00 AM - 3:45 PM ET. 3:1 risk/reward.
-- **VWAP Mean Reversion**: Buys at lower VWAP band with RSI confirmation, targets VWAP. 45-minute time stop.
-
-## Risk Management
-
-- 3% of cash per trade
-- Max 6 open positions
-- Max 25% portfolio deployed
-- Daily loss halt at -2.5%
-- Every order is a bracket order (entry + TP + SL)
+| `ALPACA_API_KEY` | (required) | Alpaca API key |
+| `ALPACA_API_SECRET` | (required) | Alpaca API secret |
+| `ALPACA_LIVE` | `false` | `true` for live trading |
+| `ALLOW_SHORT` | `false` | Enable short selling |
+| `ALLOW_MOMENTUM` | `true` | Enable momentum strategy |
 
 ## File Structure
 
 ```
 trading_bot/
-├── main.py          # Entry point + main loop
-├── config.py        # All settings
-├── strategies.py    # ORB and VWAP strategies
-├── execution.py     # Order placement
-├── risk.py          # Position sizing + circuit breaker
-├── data.py          # Alpaca data fetching
-├── dashboard.py     # Rich terminal UI
-├── requirements.txt
-└── README.md
+├── main.py              # Entry point (--backtest, --live)
+├── config.py            # Settings, 150 symbols, leveraged ETFs
+├── database.py          # SQLite schema + queries
+├── data.py              # Alpaca data fetching
+├── strategies/          # Strategy package
+│   ├── base.py          # Signal dataclass
+│   ├── regime.py        # Market regime (SPY EMA)
+│   ├── orb.py           # Opening Range Breakout
+│   ├── vwap.py          # VWAP Mean Reversion
+│   └── momentum.py      # Catalyst Momentum
+├── backtester.py        # 6-month backtest engine
+├── execution.py         # Order placement
+├── risk.py              # ATR sizing + circuit breaker
+├── earnings.py          # Earnings filter
+├── correlation.py       # Correlation filter
+├── analytics.py         # Sharpe, Sortino, drawdown
+├── dashboard.py         # Rich terminal UI V2
+├── start.sh / stop.sh / status.sh
+├── trading_bot.service  # Systemd unit
+└── requirements.txt
 ```
+
+## Month 1 Testing Guide
+
+**Week 1** (done): Validate basic mechanics run correctly.
+
+**Week 2**: Run V2 paper mode. Monitor strategy attribution.
+
+**Week 3**: Run backtest, compare to live paper results.
+
+**Week 4**: If Sharpe > 0.8, win rate > 50% for 3 weeks, consider small live test ($1k max).
+
+### Daily Checklist
+- ORB signals: 3-8/day. VWAP: 5-15/day. Momentum: 0-2/week.
+- Too many time-stops = entries too early.
+- Check `./status.sh` and `bot.log` daily.

@@ -1,5 +1,6 @@
-"""Entry point — main loop, startup checks, state persistence."""
+"""Entry point V2 — main loop, --backtest flag, filters, momentum, SQLite persistence."""
 
+import argparse
 import json
 import logging
 import sys
@@ -11,14 +12,17 @@ from rich.console import Console
 from rich.live import Live
 
 import config
+import database
+import analytics as analytics_mod
 from data import verify_connectivity, verify_data_feed, get_account, get_clock, get_positions
-from strategies import MarketRegime, ORBStrategy, VWAPStrategy, Signal
+from strategies import MarketRegime, ORBStrategy, VWAPStrategy, MomentumStrategy, Signal
 from risk import RiskManager, TradeRecord
 from execution import (
     submit_bracket_order,
     close_position,
     close_orb_positions,
     check_vwap_time_stops,
+    check_momentum_max_hold,
     cancel_all_open_orders,
 )
 from dashboard import (
@@ -27,9 +31,10 @@ from dashboard import (
     print_startup_info,
     console,
 )
+from earnings import load_earnings_cache, has_earnings_soon, get_excluded_count
+from correlation import load_correlation_cache, is_too_correlated
 
 # --- Logging setup ---
-# File handler always active; stream handler removed once Live dashboard starts
 _file_handler = logging.FileHandler(config.LOG_FILE)
 _file_handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s"))
 _stream_handler = logging.StreamHandler(sys.stdout)
@@ -56,28 +61,6 @@ def is_trading_hours(t: time) -> bool:
 
 def is_orb_recording_period(t: time) -> bool:
     return config.MARKET_OPEN <= t < config.ORB_END
-
-
-def save_state(risk: RiskManager):
-    """Save state to JSON file."""
-    try:
-        state = risk.to_dict()
-        state["saved_at"] = now_et().isoformat()
-        Path(config.STATE_FILE).write_text(json.dumps(state, indent=2))
-    except Exception as e:
-        logger.error(f"Failed to save state: {e}")
-
-
-def load_state(risk: RiskManager):
-    """Load state from JSON file if it exists."""
-    try:
-        path = Path(config.STATE_FILE)
-        if path.exists():
-            data = json.loads(path.read_text())
-            risk.load_from_dict(data, now_et())
-            logger.info(f"State loaded from {config.STATE_FILE}")
-    except Exception as e:
-        logger.error(f"Failed to load state: {e}")
 
 
 def startup_checks() -> dict:
@@ -111,8 +94,9 @@ def startup_checks() -> dict:
     console.print("[green]Data feed verified.[/green]")
 
     # 4. Print symbol list
-    console.print(f"\n[bold]Symbol universe:[/bold] {len(config.SYMBOLS)} symbols")
-    console.print(", ".join(config.SYMBOLS[:10]) + f"... and {len(config.SYMBOLS) - 10} more\n")
+    console.print(f"\n[bold]Symbol universe:[/bold] {len(config.SYMBOLS)} symbols ({len(config.CORE_SYMBOLS)} core + {len(config.SYMBOLS) - len(config.CORE_SYMBOLS)} extended)")
+    console.print(", ".join(config.SYMBOLS[:10]) + f"... and {len(config.SYMBOLS) - 10} more")
+    console.print(f"[dim]Leveraged ETFs (VWAP only): {', '.join(sorted(config.LEVERAGED_ETFS))}[/dim]\n")
 
     return info
 
@@ -123,34 +107,63 @@ def process_signals(
     regime: str,
     now: datetime,
 ):
-    """Process signals: check risk, size, and submit orders."""
+    """Process signals: check filters, risk, size, and submit orders."""
     for signal in signals:
+        skip_reason = ""
+
         # Skip if already in this symbol
         if signal.symbol in risk.open_trades:
+            skip_reason = "already_in_position"
+            database.log_signal(now, signal.symbol, signal.strategy, signal.side, False, skip_reason)
+            continue
+
+        # Earnings filter
+        if has_earnings_soon(signal.symbol):
+            skip_reason = "earnings_soon"
+            logger.info(f"Signal skipped for {signal.symbol}: earnings soon")
+            database.log_signal(now, signal.symbol, signal.strategy, signal.side, False, skip_reason)
+            continue
+
+        # Correlation filter
+        open_symbols = list(risk.open_trades.keys())
+        if open_symbols and is_too_correlated(signal.symbol, open_symbols):
+            skip_reason = "high_correlation"
+            database.log_signal(now, signal.symbol, signal.strategy, signal.side, False, skip_reason)
             continue
 
         # Check risk limits
-        allowed, reason = risk.can_open_trade()
+        allowed, reason = risk.can_open_trade(strategy=signal.strategy)
         if not allowed:
+            skip_reason = reason
             logger.info(f"Trade blocked for {signal.symbol}: {reason}")
+            database.log_signal(now, signal.symbol, signal.strategy, signal.side, False, skip_reason)
             continue
 
-        # Calculate position size
-        qty = risk.calculate_position_size(signal.entry_price, regime)
+        # Calculate position size (V2: ATR-based)
+        qty = risk.calculate_position_size(signal.entry_price, signal.stop_loss, regime)
         if qty <= 0:
+            skip_reason = "position_size_zero"
             logger.info(f"Position size 0 for {signal.symbol}, skipping")
+            database.log_signal(now, signal.symbol, signal.strategy, signal.side, False, skip_reason)
             continue
 
         # Submit bracket order
         order_id = submit_bracket_order(signal, qty)
         if order_id is None:
+            skip_reason = "order_failed"
             logger.error(f"Failed to submit order for {signal.symbol}, skipping (no naked entry)")
+            database.log_signal(now, signal.symbol, signal.strategy, signal.side, False, skip_reason)
             continue
 
         # Register the trade
         time_stop = None
+        max_hold_date = None
+        hold_type = getattr(signal, 'hold_type', 'day')
+
         if signal.strategy == "VWAP":
             time_stop = now + timedelta(minutes=config.VWAP_TIME_STOP_MINUTES)
+        elif signal.strategy == "MOMENTUM":
+            max_hold_date = now + timedelta(days=config.MOMENTUM_MAX_HOLD_DAYS)
 
         trade = TradeRecord(
             symbol=signal.symbol,
@@ -163,8 +176,13 @@ def process_signals(
             stop_loss=signal.stop_loss,
             order_id=order_id,
             time_stop=time_stop,
+            hold_type=hold_type,
+            max_hold_date=max_hold_date,
         )
         risk.register_trade(trade)
+
+        # Log signal as acted on
+        database.log_signal(now, signal.symbol, signal.strategy, signal.side, True, "")
 
 
 def sync_positions_with_broker(risk: RiskManager, now: datetime):
@@ -175,17 +193,13 @@ def sync_positions_with_broker(risk: RiskManager, now: datetime):
         logger.error(f"Failed to fetch positions: {e}")
         return
 
-    # Check if any of our tracked trades have been closed by the broker
     for symbol in list(risk.open_trades.keys()):
         if symbol not in broker_positions:
-            # Position was closed (TP or SL hit)
             trade = risk.open_trades[symbol]
-            # We don't know the exact exit price, estimate from TP/SL
-            # In production you'd check the order fill price
-            risk.close_trade(symbol, trade.entry_price, now)  # Approximate
+            # Estimate exit: if trade P&L would be positive at TP, assume TP hit
+            risk.close_trade(symbol, trade.entry_price, now, exit_reason="broker_sync")
             logger.info(f"Position {symbol} no longer at broker — marking closed")
 
-    # Update equity from account
     try:
         account = get_account()
         risk.update_equity(float(account.equity), float(account.cash))
@@ -195,7 +209,28 @@ def sync_positions_with_broker(risk: RiskManager, now: datetime):
 
 def main():
     """Main entry point."""
-    console.print("[bold cyan]Starting Algo Trading Bot...[/bold cyan]\n")
+    # Parse arguments
+    parser = argparse.ArgumentParser(description="Algo Trading Bot V2")
+    parser.add_argument("--backtest", action="store_true", help="Run backtesting engine")
+    parser.add_argument("--live", action="store_true", help="Alias for ALPACA_LIVE=true")
+    args = parser.parse_args()
+
+    if args.live:
+        import os
+        os.environ["ALPACA_LIVE"] = "true"
+
+    # Backtest mode
+    if args.backtest:
+        from backtester import run_backtest
+        database.init_db()
+        run_backtest()
+        return
+
+    console.print("[bold cyan]Starting Algo Trading Bot V2...[/bold cyan]\n")
+
+    # Initialize database
+    database.init_db()
+    database.migrate_from_json()
 
     # Startup checks
     info = startup_checks()
@@ -204,30 +239,48 @@ def main():
     regime_detector = MarketRegime()
     orb = ORBStrategy()
     vwap = VWAPStrategy()
+    momentum = MomentumStrategy()
     risk = RiskManager()
 
     # Initialize risk with account info
     risk.reset_daily(info["equity"], info["cash"])
 
-    # Load persisted state
-    load_state(risk)
+    # Load persisted state from DB
+    risk.load_from_db()
+
+    # Load filters
+    console.print("Loading earnings calendar...")
+    try:
+        load_earnings_cache(config.SYMBOLS)
+    except Exception as e:
+        console.print(f"[yellow]Earnings filter load failed: {e} (continuing without)[/yellow]")
+
+    console.print("Loading correlation data...")
+    try:
+        load_correlation_cache(config.SYMBOLS)
+    except Exception as e:
+        console.print(f"[yellow]Correlation filter load failed: {e} (continuing without)[/yellow]")
 
     start_time = now_et()
     last_scan = None
     last_state_save = now_et()
+    last_analytics_update = now_et()
     last_day = now_et().date()
     eod_summary_printed = False
+    current_analytics = None
 
-    console.print("[bold green]Bot is running. Press Ctrl+C to stop.[/bold green]\n")
+    console.print(f"\n[bold green]Bot V2 is running. Press Ctrl+C to stop.[/bold green]")
+    console.print(f"[dim]Strategies: ORB + VWAP + {'MOMENTUM' if config.ALLOW_MOMENTUM else 'MOMENTUM(disabled)'}[/dim]\n")
 
-    # Stop logging to terminal — dashboard takes over the screen
+    # Stop logging to terminal — dashboard takes over
     logging.getLogger().removeHandler(_stream_handler)
 
     try:
         with Live(
-            build_dashboard(risk, regime_detector.regime, start_time, now_et(), last_scan, len(config.SYMBOLS)),
+            build_dashboard(risk, regime_detector.regime, start_time, now_et(), last_scan,
+                          len(config.SYMBOLS), current_analytics, get_excluded_count()),
             console=console,
-            refresh_per_second=0.2,  # update every 5 seconds
+            refresh_per_second=0.2,
             transient=False,
         ) as live:
             while True:
@@ -239,6 +292,7 @@ def main():
                     logger.info("New trading day — resetting state")
                     orb.reset_daily()
                     vwap.reset_daily()
+                    momentum.reset_daily()
                     try:
                         account = get_account()
                         risk.reset_daily(float(account.equity), float(account.cash))
@@ -246,6 +300,13 @@ def main():
                         logger.error(f"Failed to reset daily: {e}")
                     last_day = current.date()
                     eod_summary_printed = False
+
+                    # Refresh daily caches
+                    try:
+                        load_earnings_cache(config.SYMBOLS)
+                        load_correlation_cache(config.SYMBOLS)
+                    except Exception as e:
+                        logger.error(f"Failed to refresh daily caches: {e}")
 
                 # Update regime
                 regime = regime_detector.update(current)
@@ -256,8 +317,7 @@ def main():
                     # ORB recording period (9:30-10:00)
                     if is_orb_recording_period(current_time):
                         if not orb.ranges_recorded and current_time >= time(9, 55):
-                            # Record at 9:55 to ensure we have most of the range
-                            orb.record_opening_ranges(config.SYMBOLS, current)
+                            orb.record_opening_ranges(config.STANDARD_SYMBOLS, current)
 
                     # Trading hours (10:00-15:45)
                     if is_trading_hours(current_time):
@@ -265,12 +325,21 @@ def main():
 
                         # Run strategies based on regime
                         if regime in ("BULLISH", "UNKNOWN"):
-                            orb_signals = orb.scan(config.SYMBOLS, current)
+                            orb_signals = orb.scan(config.STANDARD_SYMBOLS, current)
                             signals.extend(orb_signals)
 
-                        # VWAP runs in all regimes
+                        # VWAP runs on all symbols in all regimes
                         vwap_signals = vwap.scan(config.SYMBOLS, current, regime)
                         signals.extend(vwap_signals)
+
+                        # Momentum: once daily at 10:30 AM
+                        if (config.ALLOW_MOMENTUM
+                            and current_time >= config.MOMENTUM_SCAN_TIME
+                            and not momentum.scanned_today):
+                            mom_signals = momentum.scan(
+                                config.STANDARD_SYMBOLS, current, regime_detector
+                            )
+                            signals.extend(mom_signals)
 
                         # Process signals
                         if signals:
@@ -279,14 +348,21 @@ def main():
                         # Check VWAP time stops
                         expired = check_vwap_time_stops(risk.open_trades, current)
                         for symbol in expired:
-                            risk.close_trade(symbol, risk.open_trades[symbol].entry_price if symbol in risk.open_trades else 0, current)
+                            if symbol in risk.open_trades:
+                                risk.close_trade(symbol, risk.open_trades[symbol].entry_price, current, exit_reason="time_stop")
+
+                        # Check momentum max hold
+                        expired_mom = check_momentum_max_hold(risk.open_trades, current)
+                        for symbol in expired_mom:
+                            if symbol in risk.open_trades:
+                                risk.close_trade(symbol, risk.open_trades[symbol].entry_price, current, exit_reason="max_hold")
 
                     # ORB exit time (15:45)
                     if current_time >= config.ORB_EXIT_TIME:
                         closed = close_orb_positions(risk.open_trades, current)
                         for symbol in closed:
                             if symbol in risk.open_trades:
-                                risk.close_trade(symbol, risk.open_trades[symbol].entry_price, current)
+                                risk.close_trade(symbol, risk.open_trades[symbol].entry_price, current, exit_reason="eod_close")
 
                     # Sync with broker
                     sync_positions_with_broker(risk, current)
@@ -296,21 +372,52 @@ def main():
 
                     last_scan = current
 
-                # EOD summary at 16:15
+                # EOD summary + daily snapshot at 16:15
                 if current_time >= config.EOD_SUMMARY_TIME and not eod_summary_printed:
                     summary = risk.get_day_summary()
                     print_day_summary(summary)
                     logger.info(f"Day summary: {summary}")
+
+                    # Save daily snapshot to DB
+                    try:
+                        wr = summary.get("win_rate", 0) if summary.get("trades", 0) > 0 else 0
+                        database.save_daily_snapshot(
+                            date=current.strftime("%Y-%m-%d"),
+                            portfolio_value=risk.current_equity,
+                            cash=risk.current_cash,
+                            day_pnl=risk.day_pnl * risk.starting_equity,
+                            day_pnl_pct=risk.day_pnl,
+                            total_trades=summary.get("trades", 0),
+                            win_rate=wr,
+                            sharpe_rolling=current_analytics.get("sharpe_7d", 0) if current_analytics else 0,
+                        )
+                    except Exception as e:
+                        logger.error(f"Failed to save daily snapshot: {e}")
+
                     eod_summary_printed = True
 
-                # Save state periodically
+                # Save state to DB periodically
                 if (current - last_state_save).total_seconds() >= config.STATE_SAVE_INTERVAL_SEC:
-                    save_state(risk)
+                    try:
+                        database.save_open_positions(risk.open_trades)
+                    except Exception as e:
+                        logger.error(f"Failed to save state: {e}")
                     last_state_save = current
+
+                # Update analytics every 5 minutes
+                if (current - last_analytics_update).total_seconds() >= 300:
+                    try:
+                        current_analytics = analytics_mod.compute_analytics()
+                    except Exception as e:
+                        logger.error(f"Failed to compute analytics: {e}")
+                    last_analytics_update = current
 
                 # Update dashboard
                 live.update(
-                    build_dashboard(risk, regime, start_time, current, last_scan, len(config.SYMBOLS))
+                    build_dashboard(
+                        risk, regime, start_time, current, last_scan,
+                        len(config.SYMBOLS), current_analytics, get_excluded_count(),
+                    )
                 )
 
                 # Sleep until next scan
@@ -318,11 +425,17 @@ def main():
 
     except KeyboardInterrupt:
         console.print("\n[yellow]Shutting down gracefully...[/yellow]")
-        save_state(risk)
+        try:
+            database.save_open_positions(risk.open_trades)
+        except Exception:
+            pass
         console.print("[green]State saved. Bot stopped.[/green]")
     except Exception as e:
         logger.exception(f"Unexpected error: {e}")
-        save_state(risk)
+        try:
+            database.save_open_positions(risk.open_trades)
+        except Exception:
+            pass
         console.print(f"[bold red]Bot crashed: {e}[/bold red]")
         console.print("[yellow]State saved. Restart with: python main.py[/yellow]")
         sys.exit(1)

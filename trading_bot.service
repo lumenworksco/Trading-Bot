@@ -1,0 +1,18 @@
+[Unit]
+Description=Algorithmic Trading Bot V2
+After=network.target
+
+[Service]
+Type=simple
+User=YOUR_USERNAME
+WorkingDirectory=/path/to/trading_bot
+Environment="ALPACA_API_KEY=your_key"
+Environment="ALPACA_API_SECRET=your_secret"
+ExecStart=/usr/bin/python3 main.py --live
+Restart=always
+RestartSec=10
+StandardOutput=append:/var/log/trading_bot.log
+StandardError=append:/var/log/trading_bot_error.log
+
+[Install]
+WantedBy=multi-user.target

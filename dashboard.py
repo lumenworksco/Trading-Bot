@@ -1,17 +1,13 @@
-"""Rich terminal dashboard — updates every 5 seconds."""
+"""Rich terminal dashboard V2 — metrics, strategy breakdown, week P&L."""
 
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime
 
 from rich.console import Console
-from rich.layout import Layout
-from rich.live import Live
 from rich.panel import Panel
-from rich.table import Table
-from rich.text import Text
 
 import config
-from risk import RiskManager, TradeRecord
+from risk import RiskManager
 
 logger = logging.getLogger(__name__)
 console = Console()
@@ -45,6 +41,8 @@ def build_dashboard(
     now: datetime,
     last_scan_time: datetime | None,
     num_symbols: int,
+    analytics: dict | None = None,
+    earnings_excluded: int = 0,
 ) -> Panel:
     """Build the full dashboard layout as a Rich Panel."""
 
@@ -54,7 +52,6 @@ def build_dashboard(
     regime_color = "green" if regime == "BULLISH" else "red" if regime == "BEARISH" else "yellow"
     regime_text = f"[{regime_color}]{regime}[/{regime_color}]"
 
-    # Circuit breaker
     cb_text = (
         "[bold red]ACTIVE - NO NEW TRADES[/bold red]"
         if risk.circuit_breaker_active
@@ -62,17 +59,21 @@ def build_dashboard(
     )
 
     # Header
-    header = (
-        f"  ALGO BOT | {mode} MODE | Regime: {regime_text} | Up: {uptime}"
-    )
+    header = f"  ALGO BOT V2 | {mode} MODE | Regime: {regime_text} | Up: {uptime}"
 
     # Portfolio section
     day_pnl_dollars = risk.day_pnl * risk.starting_equity if risk.starting_equity else 0
     portfolio_lines = [
-        f"  Value:   ${risk.current_equity:,.0f}",
-        f"  Cash:    ${risk.current_cash:,.0f}",
-        f"  Day P&L: {format_pnl(day_pnl_dollars)} {format_pnl_pct(risk.day_pnl)}",
+        f"  Value:    ${risk.current_equity:,.0f}",
+        f"  Cash:     ${risk.current_cash:,.0f}",
+        f"  Day P&L:  {format_pnl(day_pnl_dollars)} {format_pnl_pct(risk.day_pnl)}",
     ]
+
+    # Add week P&L if analytics available
+    if analytics and analytics.get("week_pnl") is not None:
+        week_pnl = analytics["week_pnl"]
+        week_pct = analytics.get("week_pnl_pct", 0)
+        portfolio_lines.append(f"  Week P&L: {format_pnl(week_pnl)} {format_pnl_pct(week_pct)}")
 
     # Open positions
     open_count = len(risk.open_trades)
@@ -81,15 +82,42 @@ def build_dashboard(
     pos_lines = []
     for symbol, trade in risk.open_trades.items():
         held_time = format_duration(trade.entry_time, now)
-        # Estimate unrealized P&L (we don't have live price here, show entry info)
+        hold_tag = "" if trade.hold_type == "day" else " [cyan]SWING[/cyan]"
         pos_lines.append(
             f"  {symbol:<6} {trade.strategy:<5} "
             f"entry=${trade.entry_price:<8.2f} "
-            f"qty={trade.qty:<4} {held_time}"
+            f"qty={trade.qty:<4} {held_time}{hold_tag}"
         )
 
     if not pos_lines:
         pos_lines = ["  (none)"]
+
+    # Metrics panel (V2)
+    metrics_lines = []
+    if analytics:
+        s7 = analytics.get("sharpe_7d", 0)
+        wr = analytics.get("win_rate", 0)
+        pf = analytics.get("profit_factor", 0)
+        md = analytics.get("max_drawdown", 0)
+        sharpe_color = "green" if s7 > 1 else "yellow" if s7 > 0.5 else "red"
+        metrics_lines = [
+            f"  Sharpe (7d):   [{sharpe_color}]{s7:.2f}[/{sharpe_color}]",
+            f"  Win Rate:      {wr:.0%}",
+            f"  Profit Factor: {pf:.2f}",
+            f"  Max Drawdown:  {md:.1%}",
+        ]
+
+    # Strategy breakdown (V2)
+    strat_lines = []
+    if analytics and analytics.get("strategy_breakdown"):
+        breakdown = analytics["strategy_breakdown"]
+        for strat, data in breakdown.items():
+            trades_n = data.get("trades", 0)
+            wr_s = data.get("win_rate", 0)
+            pnl_s = data.get("pnl", 0)
+            strat_lines.append(
+                f"  {strat:<10} {trades_n:>3} trades  {wr_s:>3.0%} win  {format_pnl(pnl_s)}"
+            )
 
     # Recent trades
     recent = risk.closed_trades[-6:] if risk.closed_trades else []
@@ -98,40 +126,45 @@ def build_dashboard(
         icon = "[green]W[/green]" if trade.pnl > 0 else "[red]L[/red]"
         time_str = trade.exit_time.strftime("%H:%M") if trade.exit_time else "??:??"
         pnl_pct = trade.pnl / (trade.entry_price * trade.qty) if trade.entry_price * trade.qty > 0 else 0
+        reason = f" ({trade.exit_reason})" if trade.exit_reason else ""
         recent_lines.append(
             f"  {time_str} {trade.side.upper():<5} {trade.symbol:<6} "
             f"{trade.strategy:<5} {format_pnl(trade.pnl)} "
-            f"{format_pnl_pct(pnl_pct)} {icon}"
+            f"{format_pnl_pct(pnl_pct)} {icon}{reason}"
         )
     if not recent_lines:
         recent_lines = ["  (no trades yet)"]
 
     # Footer
     scan_time_str = last_scan_time.strftime("%H:%M:%S") if last_scan_time else "---"
+    earnings_str = f" | Earnings: {earnings_excluded} excl" if earnings_excluded > 0 else ""
     footer = (
         f"  Last scan: {scan_time_str} | "
         f"{num_symbols} symbols | "
-        f"Signals today: {risk.signals_today}\n"
+        f"Signals today: {risk.signals_today}"
+        f"{earnings_str}\n"
         f"  Circuit breaker: {cb_text}"
     )
 
     # Assemble
-    content = (
-        f"[bold]{header}[/bold]\n"
-        f"{'─' * 60}\n"
-        f" PORTFOLIO\n"
-        + "\n".join(portfolio_lines)
-        + f"\n{'─' * 60}\n"
-        f" {pos_header}\n"
-        + "\n".join(pos_lines)
-        + f"\n{'─' * 60}\n"
-        f" RECENT TRADES\n"
-        + "\n".join(recent_lines)
-        + f"\n{'─' * 60}\n"
-        + footer
-    )
+    sep = f"{'─' * 68}"
+    content = f"[bold]{header}[/bold]\n{sep}\n"
 
-    return Panel(content, title="[bold cyan]ALGO TRADING BOT[/bold cyan]", border_style="cyan")
+    # Left column: Portfolio + Metrics
+    content += " PORTFOLIO\n" + "\n".join(portfolio_lines) + "\n"
+
+    if metrics_lines:
+        content += f"{sep}\n METRICS (this week)\n" + "\n".join(metrics_lines) + "\n"
+
+    content += f"{sep}\n {pos_header}\n" + "\n".join(pos_lines) + "\n"
+
+    if strat_lines:
+        content += f"{sep}\n STRATEGY BREAKDOWN (this week)\n" + "\n".join(strat_lines) + "\n"
+
+    content += f"{sep}\n RECENT TRADES\n" + "\n".join(recent_lines) + "\n"
+    content += f"{sep}\n{footer}"
+
+    return Panel(content, title="[bold cyan]ALGO TRADING BOT V2[/bold cyan]", border_style="cyan")
 
 
 def print_day_summary(summary: dict):
@@ -149,8 +182,13 @@ def print_day_summary(summary: dict):
     console.print(f"  Day P&L:         ${summary['total_pnl']:+.0f} ({summary['pnl_pct']:+.1%})")
     console.print(f"  Best trade:       {summary['best_trade']}")
     console.print(f"  Worst trade:      {summary['worst_trade']}")
-    console.print(f"  ORB win rate:     {summary['orb_win_rate']}")
-    console.print(f"  VWAP win rate:    {summary['vwap_win_rate']}")
+
+    # Per-strategy win rates
+    for key, val in summary.items():
+        if key.endswith("_win_rate"):
+            strat = key.replace("_win_rate", "").upper()
+            console.print(f"  {strat} win rate:  {val}")
+
     console.print("[bold yellow]===================[/bold yellow]\n")
 
 
