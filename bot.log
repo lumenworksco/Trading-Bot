@@ -1,0 +1,209 @@
+2026-03-12 17:38:31,512 [INFO] strategies: Market regime: BEARISH (SPY=669.63, EMA=682.34)
+2026-03-12 17:38:31,613 [WARNING] strategies: VWAP scan error for SPY: {"message":"subscription does not permit querying recent SIP data"}
+
+2026-03-12 17:38:31,716 [WARNING] strategies: VWAP scan error for QQQ: {"message":"subscription does not permit querying recent SIP data"}
+
+2026-03-12 17:38:31,812 [WARNING] strategies: VWAP scan error for AAPL: {"message":"subscription does not permit querying recent SIP data"}
+
+2026-03-12 17:38:31,916 [WARNING] strategies: VWAP scan error for MSFT: {"message":"subscription does not permit querying recent SIP data"}
+
+2026-03-12 17:38:32,012 [WARNING] strategies: VWAP scan error for NVDA: {"message":"subscription does not permit querying recent SIP data"}
+
+2026-03-12 17:38:32,131 [WARNING] strategies: VWAP scan error for TSLA: {"message":"subscription does not permit querying recent SIP data"}
+
+2026-03-12 17:38:32,236 [WARNING] strategies: VWAP scan error for AMZN: {"message":"subscription does not permit querying recent SIP data"}
+
+2026-03-12 17:38:32,336 [WARNING] strategies: VWAP scan error for GOOGL: {"message":"subscription does not permit querying recent SIP data"}
+
+2026-03-12 17:38:32,444 [WARNING] strategies: VWAP scan error for META: {"message":"subscription does not permit querying recent SIP data"}
+
+2026-03-12 17:38:32,547 [WARNING] strategies: VWAP scan error for NFLX: {"message":"subscription does not permit querying recent SIP data"}
+
+2026-03-12 17:38:32,651 [WARNING] strategies: VWAP scan error for AMD: {"message":"subscription does not permit querying recent SIP data"}
+
+2026-03-12 17:38:32,750 [WARNING] strategies: VWAP scan error for INTC: {"message":"subscription does not permit querying recent SIP data"}
+
+2026-03-12 17:38:32,853 [WARNING] strategies: VWAP scan error for SOFI: {"message":"subscription does not permit querying recent SIP data"}
+
+2026-03-12 17:38:32,955 [WARNING] strategies: VWAP scan error for PLTR: {"message":"subscription does not permit querying recent SIP data"}
+
+2026-03-12 17:38:33,075 [WARNING] strategies: VWAP scan error for COIN: {"message":"subscription does not permit querying recent SIP data"}
+
+2026-03-12 17:38:33,176 [WARNING] strategies: VWAP scan error for PYPL: {"message":"subscription does not permit querying recent SIP data"}
+
+2026-03-12 17:38:33,277 [WARNING] strategies: VWAP scan error for SNAP: {"message":"subscription does not permit querying recent SIP data"}
+
+2026-03-12 17:38:33,381 [WARNING] strategies: VWAP scan error for BABA: {"message":"subscription does not permit querying recent SIP data"}
+
+2026-03-12 17:38:33,487 [WARNING] strategies: VWAP scan error for JD: {"message":"subscription does not permit querying recent SIP data"}
+
+2026-03-12 17:38:33,593 [WARNING] strategies: VWAP scan error for SHOP: {"message":"subscription does not permit querying recent SIP data"}
+
+2026-03-12 17:38:33,688 [WARNING] strategies: VWAP scan error for JPM: {"message":"subscription does not permit querying recent SIP data"}
+
+2026-03-12 17:38:33,785 [WARNING] strategies: VWAP scan error for BAC: {"message":"subscription does not permit querying recent SIP data"}
+
+2026-03-12 17:38:33,888 [WARNING] strategies: VWAP scan error for GS: {"message":"subscription does not permit querying recent SIP data"}
+
+2026-03-12 17:38:33,998 [WARNING] strategies: VWAP scan error for V: {"message":"subscription does not permit querying recent SIP data"}
+
+2026-03-12 17:38:34,095 [WARNING] strategies: VWAP scan error for MA: {"message":"subscription does not permit querying recent SIP data"}
+
+2026-03-12 17:38:34,191 [WARNING] strategies: VWAP scan error for UNH: {"message":"subscription does not permit querying recent SIP data"}
+
+2026-03-12 17:38:34,291 [WARNING] strategies: VWAP scan error for CVX: {"message":"subscription does not permit querying recent SIP data"}
+
+2026-03-12 17:38:34,392 [WARNING] strategies: VWAP scan error for XOM: {"message":"subscription does not permit querying recent SIP data"}
+
+2026-03-12 17:38:34,497 [WARNING] strategies: VWAP scan error for LLY: {"message":"subscription does not permit querying recent SIP data"}
+
+2026-03-12 17:38:34,602 [WARNING] strategies: VWAP scan error for PFE: {"message":"subscription does not permit querying recent SIP data"}
+
+2026-03-12 17:38:34,705 [WARNING] strategies: VWAP scan error for SQ: {"message":"subscription does not permit querying recent SIP data"}
+
+2026-03-12 17:38:34,822 [WARNING] strategies: VWAP scan error for UBER: {"message":"subscription does not permit querying recent SIP data"}
+
+2026-03-12 17:38:34,926 [WARNING] strategies: VWAP scan error for LYFT: {"message":"subscription does not permit querying recent SIP data"}
+
+2026-03-12 17:38:35,027 [WARNING] strategies: VWAP scan error for ABNB: {"message":"subscription does not permit querying recent SIP data"}
+
+2026-03-12 17:38:35,131 [WARNING] strategies: VWAP scan error for RBLX: {"message":"subscription does not permit querying recent SIP data"}
+
+2026-03-12 17:38:35,237 [WARNING] strategies: VWAP scan error for AFRM: {"message":"subscription does not permit querying recent SIP data"}
+
+2026-03-12 17:38:35,335 [WARNING] strategies: VWAP scan error for HOOD: {"message":"subscription does not permit querying recent SIP data"}
+
+2026-03-12 17:38:35,436 [WARNING] strategies: VWAP scan error for CRWD: {"message":"subscription does not permit querying recent SIP data"}
+
+2026-03-12 17:38:35,539 [WARNING] strategies: VWAP scan error for PANW: {"message":"subscription does not permit querying recent SIP data"}
+
+2026-03-12 17:38:35,639 [WARNING] strategies: VWAP scan error for ZS: {"message":"subscription does not permit querying recent SIP data"}
+
+2026-03-12 17:38:35,777 [WARNING] strategies: VWAP scan error for IWM: {"message":"subscription does not permit querying recent SIP data"}
+
+2026-03-12 17:38:35,880 [WARNING] strategies: VWAP scan error for DIA: {"message":"subscription does not permit querying recent SIP data"}
+
+2026-03-12 17:38:35,980 [WARNING] strategies: VWAP scan error for XLF: {"message":"subscription does not permit querying recent SIP data"}
+
+2026-03-12 17:38:36,084 [WARNING] strategies: VWAP scan error for XLE: {"message":"subscription does not permit querying recent SIP data"}
+
+2026-03-12 17:38:36,185 [WARNING] strategies: VWAP scan error for XLK: {"message":"subscription does not permit querying recent SIP data"}
+
+2026-03-12 17:38:36,290 [WARNING] strategies: VWAP scan error for XLV: {"message":"subscription does not permit querying recent SIP data"}
+
+2026-03-12 17:38:36,391 [WARNING] strategies: VWAP scan error for ARKK: {"message":"subscription does not permit querying recent SIP data"}
+
+2026-03-12 17:38:36,495 [WARNING] strategies: VWAP scan error for GLD: {"message":"subscription does not permit querying recent SIP data"}
+
+2026-03-12 17:38:36,596 [WARNING] strategies: VWAP scan error for SLV: {"message":"subscription does not permit querying recent SIP data"}
+
+2026-03-12 17:38:36,695 [WARNING] strategies: VWAP scan error for TLT: {"message":"subscription does not permit querying recent SIP data"}
+
+2026-03-12 17:39:37,026 [WARNING] strategies: VWAP scan error for SPY: {"message":"subscription does not permit querying recent SIP data"}
+
+2026-03-12 17:39:37,117 [WARNING] strategies: VWAP scan error for QQQ: {"message":"subscription does not permit querying recent SIP data"}
+
+2026-03-12 17:39:37,222 [WARNING] strategies: VWAP scan error for AAPL: {"message":"subscription does not permit querying recent SIP data"}
+
+2026-03-12 17:39:37,337 [WARNING] strategies: VWAP scan error for MSFT: {"message":"subscription does not permit querying recent SIP data"}
+
+2026-03-12 17:39:37,440 [WARNING] strategies: VWAP scan error for NVDA: {"message":"subscription does not permit querying recent SIP data"}
+
+2026-03-12 17:39:37,534 [WARNING] strategies: VWAP scan error for TSLA: {"message":"subscription does not permit querying recent SIP data"}
+
+2026-03-12 17:39:37,634 [WARNING] strategies: VWAP scan error for AMZN: {"message":"subscription does not permit querying recent SIP data"}
+
+2026-03-12 17:39:37,726 [WARNING] strategies: VWAP scan error for GOOGL: {"message":"subscription does not permit querying recent SIP data"}
+
+2026-03-12 17:39:37,827 [WARNING] strategies: VWAP scan error for META: {"message":"subscription does not permit querying recent SIP data"}
+
+2026-03-12 17:39:37,930 [WARNING] strategies: VWAP scan error for NFLX: {"message":"subscription does not permit querying recent SIP data"}
+
+2026-03-12 17:39:38,032 [WARNING] strategies: VWAP scan error for AMD: {"message":"subscription does not permit querying recent SIP data"}
+
+2026-03-12 17:39:38,124 [WARNING] strategies: VWAP scan error for INTC: {"message":"subscription does not permit querying recent SIP data"}
+
+2026-03-12 17:39:38,221 [WARNING] strategies: VWAP scan error for SOFI: {"message":"subscription does not permit querying recent SIP data"}
+
+2026-03-12 17:39:38,322 [WARNING] strategies: VWAP scan error for PLTR: {"message":"subscription does not permit querying recent SIP data"}
+
+2026-03-12 17:39:38,424 [WARNING] strategies: VWAP scan error for COIN: {"message":"subscription does not permit querying recent SIP data"}
+
+2026-03-12 17:39:38,528 [WARNING] strategies: VWAP scan error for PYPL: {"message":"subscription does not permit querying recent SIP data"}
+
+2026-03-12 17:39:38,634 [WARNING] strategies: VWAP scan error for SNAP: {"message":"subscription does not permit querying recent SIP data"}
+
+2026-03-12 17:39:38,729 [WARNING] strategies: VWAP scan error for BABA: {"message":"subscription does not permit querying recent SIP data"}
+
+2026-03-12 17:39:38,828 [WARNING] strategies: VWAP scan error for JD: {"message":"subscription does not permit querying recent SIP data"}
+
+2026-03-12 17:39:38,932 [WARNING] strategies: VWAP scan error for SHOP: {"message":"subscription does not permit querying recent SIP data"}
+
+2026-03-12 17:39:39,029 [WARNING] strategies: VWAP scan error for JPM: {"message":"subscription does not permit querying recent SIP data"}
+
+2026-03-12 17:39:39,140 [WARNING] strategies: VWAP scan error for BAC: {"message":"subscription does not permit querying recent SIP data"}
+
+2026-03-12 17:39:39,239 [WARNING] strategies: VWAP scan error for GS: {"message":"subscription does not permit querying recent SIP data"}
+
+2026-03-12 17:39:39,332 [WARNING] strategies: VWAP scan error for V: {"message":"subscription does not permit querying recent SIP data"}
+
+2026-03-12 17:39:39,432 [WARNING] strategies: VWAP scan error for MA: {"message":"subscription does not permit querying recent SIP data"}
+
+2026-03-12 17:39:39,535 [WARNING] strategies: VWAP scan error for UNH: {"message":"subscription does not permit querying recent SIP data"}
+
+2026-03-12 17:39:39,638 [WARNING] strategies: VWAP scan error for CVX: {"message":"subscription does not permit querying recent SIP data"}
+
+2026-03-12 17:39:39,734 [WARNING] strategies: VWAP scan error for XOM: {"message":"subscription does not permit querying recent SIP data"}
+
+2026-03-12 17:39:39,833 [WARNING] strategies: VWAP scan error for LLY: {"message":"subscription does not permit querying recent SIP data"}
+
+2026-03-12 17:39:39,950 [WARNING] strategies: VWAP scan error for PFE: {"message":"subscription does not permit querying recent SIP data"}
+
+2026-03-12 17:39:40,055 [WARNING] strategies: VWAP scan error for SQ: {"message":"subscription does not permit querying recent SIP data"}
+
+2026-03-12 17:39:40,157 [WARNING] strategies: VWAP scan error for UBER: {"message":"subscription does not permit querying recent SIP data"}
+
+2026-03-12 17:39:40,260 [WARNING] strategies: VWAP scan error for LYFT: {"message":"subscription does not permit querying recent SIP data"}
+
+2026-03-12 17:39:40,360 [WARNING] strategies: VWAP scan error for ABNB: {"message":"subscription does not permit querying recent SIP data"}
+
+2026-03-12 17:39:40,468 [WARNING] strategies: VWAP scan error for RBLX: {"message":"subscription does not permit querying recent SIP data"}
+
+2026-03-12 17:39:40,573 [WARNING] strategies: VWAP scan error for AFRM: {"message":"subscription does not permit querying recent SIP data"}
+
+2026-03-12 17:39:40,679 [WARNING] strategies: VWAP scan error for HOOD: {"message":"subscription does not permit querying recent SIP data"}
+
+2026-03-12 17:39:40,780 [WARNING] strategies: VWAP scan error for CRWD: {"message":"subscription does not permit querying recent SIP data"}
+
+2026-03-12 17:39:40,883 [WARNING] strategies: VWAP scan error for PANW: {"message":"subscription does not permit querying recent SIP data"}
+
+2026-03-12 17:39:40,982 [WARNING] strategies: VWAP scan error for ZS: {"message":"subscription does not permit querying recent SIP data"}
+
+2026-03-12 17:39:41,082 [WARNING] strategies: VWAP scan error for IWM: {"message":"subscription does not permit querying recent SIP data"}
+
+2026-03-12 17:39:41,212 [WARNING] strategies: VWAP scan error for DIA: {"message":"subscription does not permit querying recent SIP data"}
+
+2026-03-12 17:39:41,315 [WARNING] strategies: VWAP scan error for XLF: {"message":"subscription does not permit querying recent SIP data"}
+
+2026-03-12 17:39:41,425 [WARNING] strategies: VWAP scan error for XLE: {"message":"subscription does not permit querying recent SIP data"}
+
+2026-03-12 17:39:41,527 [WARNING] strategies: VWAP scan error for XLK: {"message":"subscription does not permit querying recent SIP data"}
+
+2026-03-12 17:39:41,627 [WARNING] strategies: VWAP scan error for XLV: {"message":"subscription does not permit querying recent SIP data"}
+
+2026-03-12 17:39:41,733 [WARNING] strategies: VWAP scan error for ARKK: {"message":"subscription does not permit querying recent SIP data"}
+
+2026-03-12 17:39:41,835 [WARNING] strategies: VWAP scan error for GLD: {"message":"subscription does not permit querying recent SIP data"}
+
+2026-03-12 17:39:41,934 [WARNING] strategies: VWAP scan error for SLV: {"message":"subscription does not permit querying recent SIP data"}
+
+2026-03-12 17:39:42,038 [WARNING] strategies: VWAP scan error for TLT: {"message":"subscription does not permit querying recent SIP data"}
+
+2026-03-12 17:40:28,644 [INFO] risk: Restored 0 open trades from state
+2026-03-12 17:40:28,644 [INFO] __main__: State loaded from state.json
+2026-03-12 17:40:28,776 [INFO] strategies: Market regime: BEARISH (SPY=670.04, EMA=682.36)
+2026-03-12 17:48:23,885 [INFO] execution: Order submitted: buy 2 META (VWAP) order_id=2b4a4038-aeb6-4077-a167-d206a8e7d91e
+2026-03-12 17:48:23,886 [INFO] risk: Trade opened: BUY 2 META @ 639.28 (VWAP) TP=644.12 SL=637.57
+2026-03-12 17:48:23,989 [INFO] risk: Trade closed: META (VWAP) P&L=$+0.00 (0.0%)
+2026-03-12 17:48:23,990 [INFO] __main__: Position META no longer at broker — marking closed
+2026-03-12 18:10:51,454 [INFO] strategies: Market regime: BEARISH (SPY=668.86, EMA=682.25)
