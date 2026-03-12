@@ -1,4 +1,4 @@
-"""Rich terminal dashboard V2 — metrics, strategy breakdown, week P&L."""
+"""Rich terminal dashboard V3 — metrics, strategy breakdown, capital allocation, week P&L."""
 
 import logging
 from datetime import datetime
@@ -43,6 +43,7 @@ def build_dashboard(
     num_symbols: int,
     analytics: dict | None = None,
     earnings_excluded: int = 0,
+    strategy_weights: dict | None = None,
 ) -> Panel:
     """Build the full dashboard layout as a Rich Panel."""
 
@@ -59,7 +60,7 @@ def build_dashboard(
     )
 
     # Header
-    header = f"  ALGO BOT V2 | {mode} MODE | Regime: {regime_text} | Up: {uptime}"
+    header = f"  ALGO BOT V3 | {mode} MODE | Regime: {regime_text} | Up: {uptime}"
 
     # Portfolio section
     day_pnl_dollars = risk.day_pnl * risk.starting_equity if risk.starting_equity else 0
@@ -82,17 +83,25 @@ def build_dashboard(
     pos_lines = []
     for symbol, trade in risk.open_trades.items():
         held_time = format_duration(trade.entry_time, now)
-        hold_tag = "" if trade.hold_type == "day" else " [cyan]SWING[/cyan]"
+        hold_tag = ""
+        if trade.hold_type == "swing":
+            hold_tag = " [cyan]SWING[/cyan]"
+        side_tag = ""
+        if trade.side == "sell":
+            side_tag = " [magenta]SHORT[/magenta]"
+        strat_tag = trade.strategy
+        if trade.strategy == "GAP_GO":
+            strat_tag = "[yellow]GAP[/yellow]"
         pos_lines.append(
-            f"  {symbol:<6} {trade.strategy:<5} "
+            f"  {symbol:<6} {strat_tag:<5} "
             f"entry=${trade.entry_price:<8.2f} "
-            f"qty={trade.qty:<4} {held_time}{hold_tag}"
+            f"qty={trade.qty:<4} {held_time}{hold_tag}{side_tag}"
         )
 
     if not pos_lines:
         pos_lines = ["  (none)"]
 
-    # Metrics panel (V2)
+    # Metrics panel
     metrics_lines = []
     if analytics:
         s7 = analytics.get("sharpe_7d", 0)
@@ -107,7 +116,7 @@ def build_dashboard(
             f"  Max Drawdown:  {md:.1%}",
         ]
 
-    # Strategy breakdown (V2)
+    # Strategy breakdown
     strat_lines = []
     if analytics and analytics.get("strategy_breakdown"):
         breakdown = analytics["strategy_breakdown"]
@@ -119,6 +128,14 @@ def build_dashboard(
                 f"  {strat:<10} {trades_n:>3} trades  {wr_s:>3.0%} win  {format_pnl(pnl_s)}"
             )
 
+    # V3: Capital allocation weights
+    alloc_lines = []
+    if strategy_weights:
+        for strat, weight in strategy_weights.items():
+            bar_len = int(weight * 30)
+            bar = "█" * bar_len + "░" * (30 - bar_len)
+            alloc_lines.append(f"  {strat:<10} {bar} {weight:.0%}")
+
     # Recent trades
     recent = risk.closed_trades[-6:] if risk.closed_trades else []
     recent_lines = []
@@ -127,13 +144,28 @@ def build_dashboard(
         time_str = trade.exit_time.strftime("%H:%M") if trade.exit_time else "??:??"
         pnl_pct = trade.pnl / (trade.entry_price * trade.qty) if trade.entry_price * trade.qty > 0 else 0
         reason = f" ({trade.exit_reason})" if trade.exit_reason else ""
+        side_str = trade.side.upper()
         recent_lines.append(
-            f"  {time_str} {trade.side.upper():<5} {trade.symbol:<6} "
+            f"  {time_str} {side_str:<5} {trade.symbol:<6} "
             f"{trade.strategy:<5} {format_pnl(trade.pnl)} "
             f"{format_pnl_pct(pnl_pct)} {icon}{reason}"
         )
     if not recent_lines:
         recent_lines = ["  (no trades yet)"]
+
+    # V3 features status line
+    v3_status_parts = []
+    if config.WEBSOCKET_MONITORING:
+        v3_status_parts.append("WS")
+    if config.USE_ML_FILTER:
+        v3_status_parts.append("ML")
+    if config.ALLOW_SHORT:
+        v3_status_parts.append("SHORT")
+    if config.GAP_GO_ENABLED:
+        v3_status_parts.append("GAP")
+    if config.USE_RS_FILTER:
+        v3_status_parts.append("RS")
+    v3_str = f" | V3: {'+'.join(v3_status_parts)}" if v3_status_parts else ""
 
     # Footer
     scan_time_str = last_scan_time.strftime("%H:%M:%S") if last_scan_time else "---"
@@ -142,7 +174,7 @@ def build_dashboard(
         f"  Last scan: {scan_time_str} | "
         f"{num_symbols} symbols | "
         f"Signals today: {risk.signals_today}"
-        f"{earnings_str}\n"
+        f"{earnings_str}{v3_str}\n"
         f"  Circuit breaker: {cb_text}"
     )
 
@@ -150,7 +182,7 @@ def build_dashboard(
     sep = f"{'─' * 68}"
     content = f"[bold]{header}[/bold]\n{sep}\n"
 
-    # Left column: Portfolio + Metrics
+    # Portfolio + Metrics
     content += " PORTFOLIO\n" + "\n".join(portfolio_lines) + "\n"
 
     if metrics_lines:
@@ -161,10 +193,13 @@ def build_dashboard(
     if strat_lines:
         content += f"{sep}\n STRATEGY BREAKDOWN (this week)\n" + "\n".join(strat_lines) + "\n"
 
+    if alloc_lines:
+        content += f"{sep}\n CAPITAL ALLOCATION\n" + "\n".join(alloc_lines) + "\n"
+
     content += f"{sep}\n RECENT TRADES\n" + "\n".join(recent_lines) + "\n"
     content += f"{sep}\n{footer}"
 
-    return Panel(content, title="[bold cyan]ALGO TRADING BOT V2[/bold cyan]", border_style="cyan")
+    return Panel(content, title="[bold cyan]ALGO TRADING BOT V3[/bold cyan]", border_style="cyan")
 
 
 def print_day_summary(summary: dict):

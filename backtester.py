@@ -357,3 +357,111 @@ def run_backtest():
         console.print(f"[red]Failed to save results: {e}[/red]")
 
     console.print()
+
+
+# =============================================================================
+# V3: Walk-Forward Backtesting Validation
+# =============================================================================
+
+def walk_forward_test(n_splits: int = 4):
+    """Walk-forward out-of-sample validation.
+
+    Downloads 12 months of data and splits into n_splits folds.
+    For each fold: test on fold using default params. Reports OOS metrics.
+    """
+    console.print("\n[bold cyan]WALK-FORWARD VALIDATION[/bold cyan]\n")
+
+    symbols = config.CORE_SYMBOLS[:config.BACKTEST_TOP_N]
+    console.print(f"Symbols: {', '.join(symbols)}")
+    console.print(f"Period: 12 months | Folds: {n_splits}\n")
+
+    data = download_data(symbols, months=12)
+    if not data:
+        console.print("[bold red]No data downloaded. Cannot run walk-forward.[/bold red]")
+        return
+
+    # Collect all unique dates
+    all_dates = set()
+    for sym, df in data.items():
+        all_dates.update(df.index.date)
+    sorted_dates = sorted(all_dates)
+
+    if len(sorted_dates) < n_splits * 20:
+        console.print("[bold red]Not enough data for walk-forward validation.[/bold red]")
+        return
+
+    fold_size = len(sorted_dates) // (n_splits + 1)
+    orb_results = []
+    vwap_results = []
+
+    for fold in range(1, n_splits + 1):
+        test_start_idx = fold * fold_size
+        test_end_idx = test_start_idx + fold_size
+        if test_end_idx > len(sorted_dates):
+            break
+
+        test_start_date = sorted_dates[test_start_idx]
+        test_end_date = sorted_dates[min(test_end_idx, len(sorted_dates) - 1)]
+
+        test_data = {}
+        for sym, df in data.items():
+            mask = (df.index.date >= test_start_date) & (df.index.date <= test_end_date)
+            test_df = df[mask]
+            if len(test_df) >= 20:
+                test_data[sym] = test_df
+
+        if not test_data:
+            continue
+
+        orb_r = simulate_orb(test_data)
+        vwap_r = simulate_vwap(test_data)
+        orb_results.append(orb_r)
+        vwap_results.append(vwap_r)
+
+        console.print(
+            f"  Fold {fold}: {test_start_date} to {test_end_date} | "
+            f"ORB: Sharpe {orb_r.sharpe_ratio:.2f}, WR {orb_r.win_rate:.0%} ({orb_r.total_trades}t) | "
+            f"VWAP: Sharpe {vwap_r.sharpe_ratio:.2f}, WR {vwap_r.win_rate:.0%} ({vwap_r.total_trades}t)"
+        )
+
+    if not orb_results:
+        console.print("[bold red]No walk-forward results generated.[/bold red]")
+        return
+
+    console.print()
+    avg_orb_sharpe = np.mean([r.sharpe_ratio for r in orb_results])
+    avg_vwap_sharpe = np.mean([r.sharpe_ratio for r in vwap_results])
+
+    table = Table(title="Walk-Forward Summary (Out-of-Sample)", border_style="cyan")
+    table.add_column("Metric", style="bold")
+    table.add_column("ORB", justify="right")
+    table.add_column("VWAP", justify="right")
+    table.add_row("Avg OOS Sharpe", f"{avg_orb_sharpe:.2f}", f"{avg_vwap_sharpe:.2f}")
+    table.add_row("Avg OOS Win Rate",
+                   f"{np.mean([r.win_rate for r in orb_results]):.0%}",
+                   f"{np.mean([r.win_rate for r in vwap_results]):.0%}")
+    table.add_row("Total OOS Trades",
+                   str(sum(r.total_trades for r in orb_results)),
+                   str(sum(r.total_trades for r in vwap_results)))
+    console.print(table)
+
+    for name, avg in [("ORB", avg_orb_sharpe), ("VWAP", avg_vwap_sharpe)]:
+        if avg < 0.5:
+            console.print(f"[yellow]WARNING: {name} avg OOS Sharpe ({avg:.2f}) < 0.5[/yellow]")
+
+    try:
+        run_date = datetime.now().isoformat()
+        for results, strategy in [(orb_results, "ORB_WF"), (vwap_results, "VWAP_WF")]:
+            for r in results:
+                database.save_backtest_result(
+                    run_date=run_date, strategy=strategy,
+                    total_return=r.total_return, annualized_return=r.annualized_return,
+                    sharpe_ratio=r.sharpe_ratio, win_rate=r.win_rate,
+                    profit_factor=r.profit_factor, max_drawdown=r.max_drawdown,
+                    total_trades=r.total_trades, avg_hold_minutes=r.avg_hold_minutes,
+                )
+        console.print("\n[green]Walk-forward results saved to bot.db[/green]")
+    except Exception as e:
+        console.print(f"[red]Failed to save results: {e}[/red]")
+
+    console.print()

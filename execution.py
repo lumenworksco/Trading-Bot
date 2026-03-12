@@ -67,6 +67,35 @@ def _submit_order(signal: Signal, qty: int, client=None):
         )
 
 
+def can_short(symbol: str, qty: int, entry_price: float) -> tuple[bool, str]:
+    """V3: Pre-trade checks before shorting. Returns (allowed, reason)."""
+    if not config.ALLOW_SHORT:
+        return False, "shorting_disabled"
+
+    if symbol in config.NO_SHORT_SYMBOLS:
+        return False, "no_short_symbol"
+
+    try:
+        client = get_trading_client()
+
+        # Check if asset is shortable
+        asset = client.get_asset(symbol)
+        if not asset.shortable:
+            return False, "not_shortable"
+
+        # Check buying power (shorts require ~150% margin)
+        account = client.get_account()
+        required = qty * entry_price * 1.5
+        if float(account.buying_power) < required:
+            return False, "insufficient_buying_power"
+
+        return True, "ok"
+
+    except Exception as e:
+        logger.error(f"Short pre-check failed for {symbol}: {e}")
+        return False, f"check_error: {e}"
+
+
 def submit_bracket_order(signal: Signal, qty: int) -> str | None:
     """Submit a bracket order (entry + TP + SL). Returns order ID or None on failure."""
     client = get_trading_client()
@@ -159,3 +188,13 @@ def check_momentum_max_hold(open_trades: dict, now: datetime) -> list[str]:
                 if close_position(symbol, reason="momentum max hold"):
                     expired.append(symbol)
     return expired
+
+
+def close_gap_go_positions(open_trades: dict, now: datetime) -> list[str]:
+    """V3: Close all Gap & Go positions at 11:30 AM time stop."""
+    closed = []
+    for symbol, trade in list(open_trades.items()):
+        if trade.strategy == "GAP_GO":
+            if close_position(symbol, reason="gap_go time stop"):
+                closed.append(symbol)
+    return closed

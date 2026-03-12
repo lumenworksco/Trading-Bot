@@ -5,6 +5,7 @@ from strategies.regime import MarketRegime
 from strategies.orb import ORBStrategy
 from strategies.vwap import VWAPStrategy
 from strategies.momentum import MomentumStrategy
+from strategies.gap_go import GapGoStrategy
 
 __all__ = [
     "Signal",
@@ -14,4 +15,5 @@ __all__ = [
     "ORBStrategy",
     "VWAPStrategy",
     "MomentumStrategy",
+    "GapGoStrategy",
 ]

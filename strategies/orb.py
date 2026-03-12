@@ -67,7 +67,7 @@ class ORBStrategy:
         self.ranges_recorded = True
         logger.info(f"ORB ranges recorded for {len(self.ranges)} symbols, top {len(self.top_volume_symbols)} selected")
 
-    def scan(self, symbols: list[str], now: datetime) -> list[Signal]:
+    def scan(self, symbols: list[str], now: datetime, regime: str = "UNKNOWN") -> list[Signal]:
         """Scan for ORB breakout signals."""
         signals = []
 
@@ -103,31 +103,54 @@ class ORBStrategy:
 
                 latest = bars.iloc[-1]
 
-                # Need close above ORB high
-                if latest["close"] <= orb.high:
-                    continue
-
                 # Volume check: current bar volume > 1.5x average
                 avg_volume = orb.volume / 6  # 30 min / 5 min = 6 bars average
                 if latest["volume"] < config.ORB_VOLUME_MULTIPLIER * avg_volume:
                     continue
 
-                # Signal! Calculate levels
-                entry_price = orb.high * (1 + config.ORB_ENTRY_SLIPPAGE)
-                take_profit = entry_price + config.ORB_TAKE_PROFIT_MULT * orb_range
-                stop_loss = entry_price - config.ORB_STOP_LOSS_MULT * orb_range
+                # LONG: close above ORB high
+                if latest["close"] > orb.high:
+                    entry_price = orb.high * (1 + config.ORB_ENTRY_SLIPPAGE)
+                    take_profit = entry_price + config.ORB_TAKE_PROFIT_MULT * orb_range
+                    stop_loss = entry_price - config.ORB_STOP_LOSS_MULT * orb_range
 
-                signals.append(Signal(
-                    symbol=symbol,
-                    strategy="ORB",
-                    side="buy",
-                    entry_price=round(entry_price, 2),
-                    take_profit=round(take_profit, 2),
-                    stop_loss=round(stop_loss, 2),
-                    reason=f"Breakout above ORB high {orb.high:.2f}, vol={latest['volume']:.0f}",
-                    hold_type="day",
-                ))
-                self.triggered.add(symbol)
+                    signals.append(Signal(
+                        symbol=symbol,
+                        strategy="ORB",
+                        side="buy",
+                        entry_price=round(entry_price, 2),
+                        take_profit=round(take_profit, 2),
+                        stop_loss=round(stop_loss, 2),
+                        reason=f"Breakout above ORB high {orb.high:.2f}, vol={latest['volume']:.0f}",
+                        hold_type="day",
+                    ))
+                    self.triggered.add(symbol)
+
+                # V3 SHORT: close below ORB low (bearish/choppy regime only)
+                elif (
+                    config.ALLOW_SHORT
+                    and latest["close"] < orb.low
+                    and regime in ("BEARISH", "UNKNOWN")
+                    and symbol not in config.NO_SHORT_SYMBOLS
+                ):
+                    # Confirm stock is actually down on the day (>0.5%)
+                    day_change = (latest["close"] - orb.prev_close) / orb.prev_close
+                    if day_change < -0.005:
+                        entry_price = orb.low * (1 - config.ORB_ENTRY_SLIPPAGE)
+                        take_profit = entry_price - config.ORB_TAKE_PROFIT_MULT * orb_range
+                        stop_loss = entry_price + config.ORB_STOP_LOSS_MULT * orb_range
+
+                        signals.append(Signal(
+                            symbol=symbol,
+                            strategy="ORB",
+                            side="sell",
+                            entry_price=round(entry_price, 2),
+                            take_profit=round(take_profit, 2),
+                            stop_loss=round(stop_loss, 2),
+                            reason=f"Breakdown below ORB low {orb.low:.2f}, vol={latest['volume']:.0f}",
+                            hold_type="day",
+                        ))
+                        self.triggered.add(symbol)
 
             except Exception as e:
                 logger.warning(f"ORB scan error for {symbol}: {e}")

@@ -134,3 +134,111 @@ BACKTEST_SLIPPAGE = 0.0005          # 0.05% slippage per trade
 BACKTEST_COMMISSION = 0.0035        # $0.0035 per share
 BACKTEST_RISK_FREE_RATE = 0.045     # 4.5% annual
 BACKTEST_TOP_N = 20                 # Run on top 20 most liquid symbols
+
+# =============================================================================
+# V3 ADDITIONS
+# =============================================================================
+
+# --- V3: ML Signal Filter ---
+USE_ML_FILTER = os.getenv("USE_ML_FILTER", "true") == "true"
+ML_MIN_TRADES = 100                  # Min labeled trades before ML filter activates
+ML_PROBABILITY_THRESHOLD = 0.55      # Min probability to take a trade
+ML_MIN_PRECISION = 0.58              # Model must achieve > 58% precision to be used
+
+# --- V3: Short Selling ---
+SHORT_SIZE_MULTIPLIER = 0.75         # Short positions = 75% of equivalent long size
+SHORT_HARD_STOP_PCT = 0.04           # Close short if goes against you > 4%
+NO_SHORT_SYMBOLS = {"SPY", "QQQ", "IWM", "DIA"}  # Never short broad market ETFs
+
+# --- V3: Dynamic Capital Allocation ---
+DYNAMIC_ALLOCATION = os.getenv("DYNAMIC_ALLOCATION", "true") == "true"
+ALLOCATION_LOOKBACK_DAYS = 20        # Rolling window for Sharpe-based allocation
+ALLOCATION_MIN_WEIGHT = 0.10         # Min 10% per strategy
+ALLOCATION_RECALC_TIME = time(9, 0)  # Recalculate at 9:00 AM ET
+
+# --- V3: WebSocket Monitoring ---
+WEBSOCKET_MONITORING = os.getenv("WEBSOCKET_MONITORING", "true") == "true"
+WEBSOCKET_RECONNECT_SEC = 60         # Reconnect interval on disconnect
+
+# --- V3: Gap & Go Strategy ---
+GAP_GO_ENABLED = os.getenv("GAP_GO_ENABLED", "true") == "true"
+GAP_MIN_PCT = 0.03                   # Minimum gap size (3%)
+GAP_MAX_PCT = 0.08                   # Maximum gap size (8%)
+GAP_MAX_POSITIONS = 2                # Max 2 Gap & Go positions
+GAP_PREMARKET_VOL_MULT = 2.0         # Pre-market vol must be 2x average
+GAP_MIN_PRICE = 5.0                  # Minimum stock price $5
+GAP_PREMARKET_SCAN_TIME = time(9, 0) # Pre-market scan at 9:00 AM
+GAP_ENTRY_TIME = time(9, 45)         # Enter after 9:45 AM
+GAP_EXIT_TIME = time(11, 30)         # Time stop at 11:30 AM
+GAP_FIRST_CANDLE_MINUTES = 15        # First candle period
+
+# --- V3: Relative Strength ---
+USE_RS_FILTER = os.getenv("USE_RS_FILTER", "true") == "true"
+RS_LONG_THRESHOLD = 0.2              # Long only if RS > 0.2
+RS_SHORT_THRESHOLD = -0.2            # Short only if RS < -0.2
+
+# --- V3: Telegram Notifications ---
+TELEGRAM_ENABLED = os.getenv("TELEGRAM_ENABLED", "false") == "true"
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
+
+# --- V3: Web Dashboard ---
+WEB_DASHBOARD_ENABLED = os.getenv("WEB_DASHBOARD_ENABLED", "true") == "true"
+WEB_DASHBOARD_PORT = int(os.getenv("WEB_DASHBOARD_PORT", "8080"))
+
+# --- V3: Weekly Auto-Optimization ---
+AUTO_OPTIMIZE = os.getenv("AUTO_OPTIMIZE", "true") == "true"
+OPTIMIZE_MIN_IMPROVEMENT = 0.10      # Only update params if Sharpe improves > 10%
+OPTIMIZE_LOOKBACK_WEEKS = 8          # Use last 8 weeks of data
+OPTIMIZE_TIMEOUT_SEC = 7200          # Max 2 hours for optimization run
+
+# --- V3: Sector ETF Mapping (for relative strength) ---
+SECTOR_MAP = {
+    # Technology
+    "AAPL": "XLK", "MSFT": "XLK", "NVDA": "XLK", "AMD": "XLK", "INTC": "XLK",
+    "CRM": "XLK", "ADBE": "XLK", "NOW": "XLK", "PLTR": "XLK", "CRWD": "XLK",
+    "PANW": "XLK", "ZS": "XLK", "SNOW": "XLK", "DDOG": "XLK", "NET": "XLK",
+    "FTNT": "XLK", "OKTA": "XLK", "TWLO": "XLK", "MDB": "XLK", "ESTC": "XLK",
+    "CFLT": "XLK", "GTLB": "XLK", "BILL": "XLK", "HUBS": "XLK", "VEEV": "XLK",
+    "WDAY": "XLK", "ANSS": "XLK", "SMCI": "XLK", "IONQ": "XLK", "RGTI": "XLK",
+    "QUBT": "XLK", "ARQQ": "XLK", "BBAI": "XLK", "SOUN": "XLK", "APP": "XLK",
+    # Semiconductors (more specific)
+    "SOXX": "SMH", "SMH": "SMH", "SOXL": "SMH",
+    # Communication Services
+    "META": "XLC", "GOOGL": "XLC", "NFLX": "XLC", "SNAP": "XLC", "TTD": "XLC",
+    "ROKU": "XLC", "PINS": "XLC", "ZM": "XLC", "DOCU": "XLC", "DUOL": "XLC",
+    # Consumer Discretionary
+    "TSLA": "XLY", "AMZN": "XLY", "SHOP": "XLY", "BABA": "XLY", "JD": "XLY",
+    "UBER": "XLY", "LYFT": "XLY", "ABNB": "XLY", "RBLX": "XLY", "ETSY": "XLY",
+    "W": "XLY", "CHWY": "XLY", "DASH": "XLY", "CAVA": "XLY", "BROS": "XLY",
+    "SHAK": "XLY", "WING": "XLY", "TXRH": "XLY", "CMG": "XLY", "DPZ": "XLY",
+    "DNUT": "XLY", "JACK": "XLY",
+    # Financials
+    "JPM": "XLF", "BAC": "XLF", "GS": "XLF", "V": "XLF", "MA": "XLF",
+    "PYPL": "XLF", "SQ": "XLF", "SOFI": "XLF", "COIN": "XLF", "AFRM": "XLF",
+    "HOOD": "XLF",
+    # Healthcare
+    "UNH": "XLV", "LLY": "XLV", "PFE": "XLV", "PODD": "XLV",
+    # Energy
+    "CVX": "XLE", "XOM": "XLE",
+    # Clean Energy / EV
+    "ENPH": "XLE", "FSLR": "XLE", "RUN": "XLE", "BLNK": "XLE",
+    "CHPT": "XLE", "BE": "XLE",
+    # Biotech
+    "IBB": "IBB", "LABU": "IBB", "LABD": "IBB",
+    # Aerospace / Space
+    "AXON": "XLI", "ASTS": "XLI", "RDW": "XLI", "RKLB": "XLI", "LUNR": "XLI",
+    # Consumer / Other
+    "CELH": "XLP",
+}
+
+# --- V3: Runtime-mutable strategy parameters (can be updated by optimizer) ---
+_runtime_params: dict = {}
+
+def get_param(key: str, default=None):
+    """Get a runtime parameter (optimizer-modified or config default)."""
+    return _runtime_params.get(key, default)
+
+def set_param(key: str, value):
+    """Set a runtime parameter (used by optimizer)."""
+    _runtime_params[key] = value

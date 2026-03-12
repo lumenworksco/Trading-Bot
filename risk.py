@@ -41,6 +41,7 @@ class RiskManager:
     open_trades: dict = field(default_factory=dict)     # symbol -> TradeRecord
     closed_trades: list = field(default_factory=list)    # today's closed trades
     signals_today: int = 0
+    _strategy_weights: dict = field(default_factory=dict)  # V3: strategy -> weight
 
     def reset_daily(self, equity: float, cash: float):
         """Reset daily state. Preserves swing (multi-day) trades."""
@@ -89,6 +90,12 @@ class RiskManager:
             if momentum_count >= config.MAX_MOMENTUM_POSITIONS:
                 return False, f"Max momentum positions ({config.MAX_MOMENTUM_POSITIONS}) reached"
 
+        # V3: Check Gap & Go limit
+        if strategy == "GAP_GO":
+            gap_count = sum(1 for t in self.open_trades.values() if t.strategy == "GAP_GO")
+            if gap_count >= config.GAP_MAX_POSITIONS:
+                return False, f"Max Gap & Go positions ({config.GAP_MAX_POSITIONS}) reached"
+
         # Check total deployed capital
         deployed = sum(
             t.entry_price * t.qty for t in self.open_trades.values()
@@ -99,13 +106,20 @@ class RiskManager:
 
         return True, ""
 
-    def calculate_position_size(self, entry_price: float, stop_price: float, regime: str) -> int:
+    def calculate_position_size(self, entry_price: float, stop_price: float,
+                               regime: str, strategy: str = "",
+                               side: str = "buy") -> int:
         """ATR-based position sizing: risk exactly 1% of portfolio per trade.
+
+        V3: Applies dynamic capital allocation weights per strategy and
+        short selling multiplier for sell-side trades.
 
         Args:
             entry_price: Expected entry price
             stop_price: Stop loss price
             regime: Market regime ('BULLISH', 'BEARISH', 'UNKNOWN')
+            strategy: Strategy name for capital allocation weighting
+            side: 'buy' or 'sell' — shorts get reduced sizing
         """
         # Risk per trade = 1% of portfolio
         risk_per_trade = self.current_equity * config.RISK_PER_TRADE_PCT
@@ -119,6 +133,15 @@ class RiskManager:
         shares = risk_per_trade / risk_per_share
         position_value = shares * entry_price
 
+        # V3: Apply dynamic capital allocation weight
+        if config.DYNAMIC_ALLOCATION and strategy and self._strategy_weights:
+            weight = self._strategy_weights.get(strategy, 1.0)
+            # Scale position by strategy weight relative to equal weight
+            n_strategies = len(self._strategy_weights)
+            equal_weight = 1.0 / max(n_strategies, 1)
+            weight_factor = weight / equal_weight if equal_weight > 0 else 1.0
+            position_value *= weight_factor
+
         # Hard caps
         max_position = self.current_equity * config.MAX_POSITION_PCT
         position_value = max(config.MIN_POSITION_VALUE, min(position_value, max_position))
@@ -126,6 +149,10 @@ class RiskManager:
         # Cut size in bearish regime
         if regime == "BEARISH":
             position_value *= (1 - config.BEARISH_SIZE_CUT)
+
+        # V3: Short selling size reduction
+        if side == "sell":
+            position_value *= config.SHORT_SIZE_MULTIPLIER
 
         # Check we don't exceed max deployment
         deployed = sum(t.entry_price * t.qty for t in self.open_trades.values())
@@ -253,6 +280,82 @@ class RiskManager:
             logger.info(f"Restored {len(self.open_trades)} open trades from database")
         except Exception as e:
             logger.error(f"Failed to load positions from DB: {e}")
+
+    # --- V3: Dynamic Capital Allocation ---
+
+    def update_strategy_weights(self):
+        """Recalculate capital allocation weights based on rolling Sharpe.
+
+        Called daily at 9:00 AM. Strategies with higher recent Sharpe
+        get proportionally more capital.
+        """
+        if not config.DYNAMIC_ALLOCATION:
+            return
+
+        try:
+            sharpes = {}
+            strategies = ["ORB", "VWAP", "MOMENTUM"]
+            if config.GAP_GO_ENABLED:
+                strategies.append("GAP_GO")
+
+            for strategy in strategies:
+                trades = database.get_recent_trades_by_strategy(
+                    strategy, days=config.ALLOCATION_LOOKBACK_DAYS
+                )
+                if len(trades) < 5:
+                    sharpes[strategy] = 0.5  # Default if insufficient data
+                else:
+                    daily_pnls = self._compute_strategy_daily_returns(trades)
+                    sharpes[strategy] = max(self._compute_sharpe(daily_pnls), 0.1)
+
+            total_sharpe = sum(sharpes.values())
+            if total_sharpe <= 0:
+                return
+
+            self._strategy_weights = {
+                s: max(sharpe / total_sharpe, config.ALLOCATION_MIN_WEIGHT)
+                for s, sharpe in sharpes.items()
+            }
+
+            # Normalize so weights sum to 1.0
+            total_weight = sum(self._strategy_weights.values())
+            if total_weight > 0:
+                self._strategy_weights = {
+                    s: w / total_weight for s, w in self._strategy_weights.items()
+                }
+
+            logger.info(f"Capital allocation updated: {self._strategy_weights}")
+            database.log_allocation_weights(self._strategy_weights)
+
+        except Exception as e:
+            logger.error(f"Failed to update strategy weights: {e}")
+
+    def get_strategy_weights(self) -> dict:
+        """Get current strategy capital weights."""
+        return dict(self._strategy_weights)
+
+    @staticmethod
+    def _compute_strategy_daily_returns(trades: list[dict]) -> list[float]:
+        """Compute daily return series from a list of trade dicts."""
+        from collections import defaultdict
+        daily = defaultdict(float)
+        for t in trades:
+            exit_date = t.get("exit_time", "")[:10]
+            if exit_date:
+                daily[exit_date] += t.get("pnl_pct", 0.0)
+        return list(daily.values()) if daily else []
+
+    @staticmethod
+    def _compute_sharpe(daily_returns: list[float], rf_annual: float = 0.045) -> float:
+        """Simple annualized Sharpe ratio."""
+        import numpy as np
+        if len(daily_returns) < 2:
+            return 0.0
+        arr = np.array(daily_returns)
+        excess = arr - rf_annual / 252
+        if np.std(excess) == 0:
+            return 0.0
+        return float(np.mean(excess) / np.std(excess) * np.sqrt(252))
 
     # --- Legacy serialization (kept for migration compatibility) ---
 

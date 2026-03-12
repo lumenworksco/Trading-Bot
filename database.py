@@ -92,10 +92,44 @@ def init_db():
             avg_hold_minutes REAL
         );
 
+        -- V3: ML model performance history
+        CREATE TABLE IF NOT EXISTS model_performance (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            timestamp TEXT NOT NULL,
+            strategy TEXT NOT NULL,
+            train_samples INTEGER,
+            test_precision REAL,
+            test_recall REAL,
+            test_f1 REAL,
+            features_used TEXT,
+            model_version TEXT
+        );
+
+        -- V3: Parameter optimization history
+        CREATE TABLE IF NOT EXISTS optimization_history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            timestamp TEXT NOT NULL,
+            strategy TEXT NOT NULL,
+            old_params TEXT,
+            new_params TEXT,
+            old_sharpe REAL,
+            new_sharpe REAL,
+            applied INTEGER DEFAULT 0
+        );
+
+        -- V3: Capital allocation weight history
+        CREATE TABLE IF NOT EXISTS allocation_history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            timestamp TEXT NOT NULL,
+            weights TEXT NOT NULL
+        );
+
         CREATE INDEX IF NOT EXISTS idx_trades_symbol ON trades(symbol);
         CREATE INDEX IF NOT EXISTS idx_trades_strategy ON trades(strategy);
         CREATE INDEX IF NOT EXISTS idx_trades_exit_time ON trades(exit_time);
         CREATE INDEX IF NOT EXISTS idx_signals_timestamp ON signals(timestamp);
+        CREATE INDEX IF NOT EXISTS idx_signals_strategy ON signals(strategy);
+        CREATE INDEX IF NOT EXISTS idx_signals_acted ON signals(acted_on);
     """)
     conn.commit()
     logger.info("Database initialized")
@@ -298,3 +332,148 @@ def migrate_from_json():
 
     except Exception as e:
         logger.error(f"Migration from state.json failed: {e}")
+
+
+# =============================================================================
+# V3 ADDITIONS
+# =============================================================================
+
+# --- Strategy-specific trade queries ---
+
+def get_recent_trades_by_strategy(strategy: str, days: int = 20) -> list[dict]:
+    """Get trades for a specific strategy from the last N days."""
+    conn = _get_conn()
+    cutoff = (datetime.now(config.ET) - __import__('datetime').timedelta(days=days)).isoformat()
+    rows = conn.execute(
+        "SELECT * FROM trades WHERE strategy = ? AND exit_time >= ? ORDER BY exit_time",
+        (strategy, cutoff),
+    ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def get_signals_with_outcomes() -> list[dict]:
+    """JOIN signals that were acted on with their trade outcomes for ML training.
+
+    Returns rows with signal fields + trade pnl/pnl_pct (if trade exists).
+    Only returns signals that were acted on (acted_on=1) and have a matching trade.
+    """
+    conn = _get_conn()
+    rows = conn.execute("""
+        SELECT
+            s.timestamp, s.symbol, s.strategy, s.signal_type,
+            t.entry_price, t.exit_price, t.qty,
+            t.entry_time, t.exit_time, t.exit_reason,
+            t.pnl, t.pnl_pct,
+            CASE WHEN t.pnl > 0 THEN 1 ELSE 0 END as profitable
+        FROM signals s
+        INNER JOIN trades t
+            ON s.symbol = t.symbol
+            AND s.strategy = t.strategy
+            AND s.acted_on = 1
+            AND ABS(julianday(s.timestamp) - julianday(t.entry_time)) < 0.01
+        ORDER BY s.timestamp
+    """).fetchall()
+    return [dict(row) for row in rows]
+
+
+def get_trade_count_by_strategy(strategy: str) -> int:
+    """Get total number of completed trades for a strategy."""
+    conn = _get_conn()
+    row = conn.execute(
+        "SELECT COUNT(*) as cnt FROM trades WHERE strategy = ?",
+        (strategy,),
+    ).fetchone()
+    return row["cnt"]
+
+
+# --- ML Model Performance ---
+
+def log_model_performance(strategy: str, train_samples: int,
+                          test_precision: float, test_recall: float,
+                          test_f1: float, features_used: list[str],
+                          model_version: str):
+    """Log ML model training results."""
+    conn = _get_conn()
+    conn.execute(
+        """INSERT INTO model_performance
+           (timestamp, strategy, train_samples, test_precision, test_recall,
+            test_f1, features_used, model_version)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+        (datetime.now(config.ET).isoformat(), strategy, train_samples,
+         test_precision, test_recall, test_f1,
+         json.dumps(features_used), model_version),
+    )
+    conn.commit()
+
+
+# --- Optimization History ---
+
+def log_optimization(strategy: str, old_params: dict, new_params: dict,
+                     old_sharpe: float, new_sharpe: float, applied: bool):
+    """Log a parameter optimization run."""
+    conn = _get_conn()
+    conn.execute(
+        """INSERT INTO optimization_history
+           (timestamp, strategy, old_params, new_params, old_sharpe, new_sharpe, applied)
+           VALUES (?, ?, ?, ?, ?, ?, ?)""",
+        (datetime.now(config.ET).isoformat(), strategy,
+         json.dumps(old_params), json.dumps(new_params),
+         old_sharpe, new_sharpe, 1 if applied else 0),
+    )
+    conn.commit()
+
+
+# --- Allocation History ---
+
+def log_allocation_weights(weights: dict):
+    """Log capital allocation weight change."""
+    conn = _get_conn()
+    conn.execute(
+        "INSERT INTO allocation_history (timestamp, weights) VALUES (?, ?)",
+        (datetime.now(config.ET).isoformat(), json.dumps(weights)),
+    )
+    conn.commit()
+
+
+# --- Signal Statistics (extended for web dashboard) ---
+
+def get_signals_by_date(date_str: str) -> list[dict]:
+    """Get all signals for a specific date."""
+    conn = _get_conn()
+    rows = conn.execute(
+        "SELECT * FROM signals WHERE timestamp LIKE ? ORDER BY timestamp",
+        (f"{date_str}%",),
+    ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def get_signal_skip_reasons(days: int = 7) -> dict:
+    """Get breakdown of signal skip reasons over last N days."""
+    conn = _get_conn()
+    cutoff = (datetime.now(config.ET) - __import__('datetime').timedelta(days=days)).isoformat()
+    rows = conn.execute(
+        """SELECT skip_reason, COUNT(*) as cnt
+           FROM signals
+           WHERE timestamp >= ? AND acted_on = 0 AND skip_reason != ''
+           GROUP BY skip_reason
+           ORDER BY cnt DESC""",
+        (cutoff,),
+    ).fetchall()
+    return {row["skip_reason"]: row["cnt"] for row in rows}
+
+
+def get_trades_paginated(limit: int = 100, offset: int = 0,
+                         strategy: str | None = None) -> list[dict]:
+    """Get trades with pagination and optional strategy filter."""
+    conn = _get_conn()
+    if strategy:
+        rows = conn.execute(
+            "SELECT * FROM trades WHERE strategy = ? ORDER BY exit_time DESC LIMIT ? OFFSET ?",
+            (strategy, limit, offset),
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            "SELECT * FROM trades ORDER BY exit_time DESC LIMIT ? OFFSET ?",
+            (limit, offset),
+        ).fetchall()
+    return [dict(row) for row in rows]

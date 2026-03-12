@@ -110,12 +110,15 @@ class VWAPStrategy:
                     ))
                     self.triggered[symbol] = now
 
-                # SELL/SHORT signal: price touched upper band and dropped below
+                # V3 SELL/SHORT signal: upper band rejection (bearish/choppy regime only)
                 elif (
                     config.ALLOW_SHORT
+                    and regime in ("BEARISH", "UNKNOWN")
+                    and symbol not in config.NO_SHORT_SYMBOLS
                     and prev_bar["high"] >= upper
                     and curr_bar["close"] < upper
                     and rsi > config.VWAP_RSI_OVERBOUGHT
+                    and day_move > 0.01  # Stock must be up > 1% already today
                 ):
                     std_dev = (upper - vwap) / config.VWAP_BAND_STD
                     stop_loss = upper + config.VWAP_STOP_EXTENSION * std_dev
