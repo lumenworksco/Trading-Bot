@@ -1,4 +1,4 @@
-"""Order execution — bracket orders, retries, EOD exits, momentum orders."""
+"""Order execution — bracket orders, TWAP splitting, retries, EOD exits."""
 
 import logging
 import time
@@ -18,12 +18,49 @@ logger = logging.getLogger(__name__)
 
 
 def _submit_order(signal: Signal, qty: int, client=None):
-    """Internal: submit a single order. Returns order object."""
+    """Internal: submit a single order. Returns order object.
+
+    V6 strategy routing:
+      - STAT_MR / KALMAN_PAIRS  -> LIMIT (mean-reversion, not time-sensitive)
+      - MICRO_MOM / BETA_HEDGE  -> MARKET (speed matters)
+    Legacy strategies (MOMENTUM, ORB, VWAP, etc.) are kept as fallback.
+    """
     if client is None:
         client = get_trading_client()
 
     side = OrderSide.BUY if signal.side == "buy" else OrderSide.SELL
 
+    # --- V6 strategies ---------------------------------------------------
+    if signal.strategy in ("STAT_MR", "KALMAN_PAIRS"):
+        # Mean-reversion: limit order, not time-sensitive
+        return client.submit_order(
+            LimitOrderRequest(
+                symbol=signal.symbol,
+                qty=qty,
+                side=side,
+                time_in_force=TimeInForce.DAY,
+                limit_price=round(signal.entry_price, 2),
+                order_class=OrderClass.BRACKET,
+                take_profit={"limit_price": round(signal.take_profit, 2)},
+                stop_loss={"stop_price": round(signal.stop_loss, 2)},
+            )
+        )
+
+    if signal.strategy in ("MICRO_MOM", "BETA_HEDGE"):
+        # Momentum / hedge: market order, speed matters
+        return client.submit_order(
+            MarketOrderRequest(
+                symbol=signal.symbol,
+                qty=qty,
+                side=side,
+                time_in_force=TimeInForce.DAY,
+                order_class=OrderClass.BRACKET,
+                take_profit={"limit_price": round(signal.take_profit, 2)},
+                stop_loss={"stop_price": round(signal.stop_loss, 2)},
+            )
+        )
+
+    # --- Legacy strategies (backward compat) -----------------------------
     if signal.strategy == "MOMENTUM":
         # Momentum uses GTC limit order with bracket (holds overnight)
         return client.submit_order(
@@ -53,7 +90,7 @@ def _submit_order(signal: Signal, qty: int, client=None):
             )
         )
     else:
-        # VWAP uses market order (speed matters, day only)
+        # VWAP and others: market order (speed matters, day only)
         return client.submit_order(
             MarketOrderRequest(
                 symbol=signal.symbol,
@@ -96,8 +133,58 @@ def can_short(symbol: str, qty: int, entry_price: float) -> tuple[bool, str]:
         return False, f"check_error: {e}"
 
 
-def submit_bracket_order(signal: Signal, qty: int) -> str | None:
-    """Submit a bracket order (entry + TP + SL). Returns order ID or None on failure."""
+def submit_twap_order(
+    signal: Signal, total_qty: int, slices: int = 5, interval_sec: int = 60
+) -> list[str]:
+    """Split large orders into time-weighted slices (TWAP).
+
+    For orders > $2000, split into `slices` smaller orders spaced
+    `interval_sec` apart.  Each slice is a bracket order with the same TP/SL.
+
+    Returns list of order IDs.
+    """
+    client = get_trading_client()
+    slice_qty = total_qty // slices
+    remainder = total_qty % slices
+    order_ids: list[str] = []
+
+    for i in range(slices):
+        # Add remainder shares to the last slice
+        qty = slice_qty + (remainder if i == slices - 1 else 0)
+        if qty <= 0:
+            continue
+
+        try:
+            order = _submit_order(signal, qty, client)
+            oid = str(order.id)
+            order_ids.append(oid)
+            logger.info(
+                f"TWAP slice {i+1}/{slices}: {signal.side.upper()} {qty} "
+                f"{signal.symbol} ({signal.strategy}) order_id={oid}"
+            )
+        except Exception as e:
+            logger.error(
+                f"TWAP slice {i+1}/{slices} failed for {signal.symbol}: {e}"
+            )
+
+        # Sleep between slices (not after the last one)
+        if i < slices - 1:
+            time.sleep(interval_sec)
+
+    return order_ids
+
+
+def submit_bracket_order(signal: Signal, qty: int) -> str | list[str] | None:
+    """Submit bracket order, auto-routing to TWAP for large orders.
+
+    Returns a single order ID (str), a list of order IDs (TWAP), or None on
+    failure.
+    """
+    # Auto-route large mean-reversion orders to TWAP
+    order_value = qty * signal.entry_price
+    if order_value > 2000 and signal.strategy in ("STAT_MR", "KALMAN_PAIRS"):
+        return submit_twap_order(signal, qty)
+
     client = get_trading_client()
 
     try:

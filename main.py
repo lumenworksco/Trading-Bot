@@ -1,5 +1,9 @@
-"""Entry point V5 — shadow mode, EMA scalper, two-tier scanning, diagnostic mode,
-morning health check, plus all V4 features."""
+"""Entry point V6 — Velox V6 Autonomous Trading System.
+
+Three-strategy portfolio with volatility-targeted sizing, daily P&L locks,
+and beta neutralization.  Strategies: StatMeanReversion (60%),
+KalmanPairsTrader (25%), IntradayMicroMomentum (15%).
+"""
 
 import argparse
 import asyncio
@@ -15,20 +19,26 @@ from rich.live import Live
 import config
 import database
 import analytics as analytics_mod
-from data import verify_connectivity, verify_data_feed, get_account, get_clock, get_positions
-from strategies import MarketRegime, ORBStrategy, VWAPStrategy, MomentumStrategy, GapGoStrategy, Signal
-from risk import RiskManager, TradeRecord, get_vix_risk_scalar
+from data import (
+    verify_connectivity, verify_data_feed, get_account, get_clock,
+    get_positions, get_snapshot, get_snapshots,
+)
+from strategies.base import Signal
+from strategies.regime import MarketRegime
+from strategies.stat_mean_reversion import StatMeanReversion
+from strategies.kalman_pairs import KalmanPairsTrader
+from strategies.micro_momentum import IntradayMicroMomentum
+from risk import (
+    RiskManager, TradeRecord,
+    VolatilityTargetingRiskEngine, DailyPnLLock, BetaNeutralizer,
+)
+from risk.daily_pnl_lock import LockState
 from execution import (
     submit_bracket_order,
     close_position,
-    close_orb_positions,
-    check_vwap_time_stops,
-    check_momentum_max_hold,
+    close_partial_position,
     cancel_all_open_orders,
     can_short,
-    close_gap_go_positions,
-    check_sector_max_hold,
-    check_pairs_max_hold,
 )
 from dashboard import (
     build_dashboard,
@@ -38,17 +48,12 @@ from dashboard import (
 )
 from earnings import load_earnings_cache, has_earnings_soon, get_excluded_count
 from correlation import load_correlation_cache, is_too_correlated
-
-# V3 imports (conditional)
-try:
-    from ml_filter import ml_filter, extract_live_features
-except ImportError:
-    ml_filter = None
+from analytics.consistency_score import compute_consistency_score
 
 try:
-    from relative_strength import RelativeStrengthTracker
+    import numpy as np
 except ImportError:
-    RelativeStrengthTracker = None
+    np = None
 
 try:
     from position_monitor import PositionMonitor
@@ -59,43 +64,6 @@ try:
     import notifications
 except ImportError:
     notifications = None
-
-# V4 imports (conditional)
-try:
-    from strategies.mtf_confirmation import mtf_confirmer
-except ImportError:
-    mtf_confirmer = None
-
-try:
-    from news_filter import news_filter
-except ImportError:
-    news_filter = None
-
-try:
-    from strategies.sector_rotation import SectorRotationStrategy
-except ImportError:
-    SectorRotationStrategy = None
-
-try:
-    from strategies.pairs_trading import PairsTradingStrategy
-except ImportError:
-    PairsTradingStrategy = None
-
-try:
-    from exit_manager import ExitManager
-except ImportError:
-    ExitManager = None
-
-# V5 imports
-try:
-    from strategies.momentum_scalp import EMAScalper
-except ImportError:
-    EMAScalper = None
-
-try:
-    from backtester import quick_recent_backtest
-except ImportError:
-    quick_recent_backtest = None
 
 # --- Logging setup ---
 _file_handler = logging.FileHandler(config.LOG_FILE)
@@ -110,6 +78,10 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
+# ---------------------------------------------------------------------------
+# Time helpers
+# ---------------------------------------------------------------------------
+
 def now_et() -> datetime:
     return datetime.now(config.ET)
 
@@ -122,9 +94,9 @@ def is_trading_hours(t: time) -> bool:
     return config.TRADING_START <= t <= config.ORB_EXIT_TIME
 
 
-def is_orb_recording_period(t: time) -> bool:
-    return config.MARKET_OPEN <= t < config.ORB_END
-
+# ---------------------------------------------------------------------------
+# Startup
+# ---------------------------------------------------------------------------
 
 def startup_checks() -> dict:
     """Run all startup checks. Exit on failure."""
@@ -157,277 +129,46 @@ def startup_checks() -> dict:
     console.print("[green]Data feed verified.[/green]")
 
     # 4. Print symbol list
-    console.print(f"\n[bold]Symbol universe:[/bold] {len(config.SYMBOLS)} symbols ({len(config.CORE_SYMBOLS)} core + {len(config.SYMBOLS) - len(config.CORE_SYMBOLS)} extended)")
-    console.print(", ".join(config.SYMBOLS[:10]) + f"... and {len(config.SYMBOLS) - 10} more")
-    console.print(f"[dim]Leveraged ETFs (VWAP only): {', '.join(sorted(config.LEVERAGED_ETFS))}[/dim]\n")
+    console.print(
+        f"\n[bold]Symbol universe:[/bold] {len(config.SYMBOLS)} symbols "
+        f"({len(config.CORE_SYMBOLS)} core + {len(config.SYMBOLS) - len(config.CORE_SYMBOLS)} extended)"
+    )
+    console.print(", ".join(config.SYMBOLS[:10]) + f"... and {len(config.SYMBOLS) - 10} more\n")
 
     return info
 
 
-def process_signals(
-    signals: list[Signal],
-    risk: RiskManager,
-    regime: str,
-    now: datetime,
-    rs_tracker=None,
-    ws_monitor=None,
-    market_data: dict | None = None,
-):
-    """Process signals: check filters, risk, size, and submit orders."""
+# ---------------------------------------------------------------------------
+# Position / broker sync
+# ---------------------------------------------------------------------------
 
-    # V4: VIX halt — skip all signals if VIX >= halt threshold
-    if config.VIX_RISK_SCALING_ENABLED and get_vix_risk_scalar() == 0.0:
-        logger.info("VIX halt active — skipping all signals")
-        for signal in signals:
-            database.log_signal(now, signal.symbol, signal.strategy, signal.side, False, "vix_halt")
+def sync_positions_with_broker(risk: RiskManager, now: datetime, ws_monitor=None):
+    """Sync open trades with actual broker positions to detect fills/stops."""
+    try:
+        broker_positions = {p.symbol: p for p in get_positions()}
+    except Exception as e:
+        logger.error(f"Failed to fetch positions: {e}")
         return
 
-    # V4: Group pairs signals by pair_id for atomic processing
-    pair_groups: dict[str, list[Signal]] = {}
-    non_pair_signals: list[Signal] = []
-    for signal in signals:
-        if signal.pair_id:
-            pair_groups.setdefault(signal.pair_id, []).append(signal)
-        else:
-            non_pair_signals.append(signal)
+    for symbol in list(risk.open_trades.keys()):
+        if symbol not in broker_positions:
+            trade = risk.open_trades[symbol]
+            risk.close_trade(symbol, trade.entry_price, now, exit_reason="broker_sync")
+            logger.info(f"Position {symbol} no longer at broker -- marking closed")
 
-    # Process non-pair signals normally
-    for signal in non_pair_signals:
-        _process_single_signal(signal, risk, regime, now, rs_tracker, ws_monitor, market_data)
+            if ws_monitor:
+                ws_monitor.unsubscribe(symbol)
+            if notifications and config.WHATSAPP_ENABLED:
+                try:
+                    notifications.notify_trade_closed(trade)
+                except Exception:
+                    pass
 
-    # Process pairs atomically (both legs or neither)
-    for pair_id, pair_signals in pair_groups.items():
-        if len(pair_signals) != 2:
-            logger.warning(f"Pair {pair_id} has {len(pair_signals)} signals, skipping")
-            continue
-
-        # Check if both legs can be opened
-        all_ok = True
-        for sig in pair_signals:
-            if sig.symbol in risk.open_trades:
-                all_ok = False
-                break
-            allowed, reason = risk.can_open_trade(strategy=sig.strategy)
-            if not allowed:
-                all_ok = False
-                break
-
-        if all_ok:
-            for sig in pair_signals:
-                _process_single_signal(sig, risk, regime, now, rs_tracker, ws_monitor, market_data)
-        else:
-            for sig in pair_signals:
-                database.log_signal(now, sig.symbol, sig.strategy, sig.side, False, "pair_blocked")
-
-
-def _process_single_signal(
-    signal: Signal,
-    risk: RiskManager,
-    regime: str,
-    now: datetime,
-    rs_tracker=None,
-    ws_monitor=None,
-    market_data: dict | None = None,
-):
-    """Process a single signal through all filters and submit if valid."""
-    skip_reason = ""
-
-    # Skip if already in this symbol
-    if signal.symbol in risk.open_trades:
-        skip_reason = "already_in_position"
-        database.log_signal(now, signal.symbol, signal.strategy, signal.side, False, skip_reason)
-        return
-
-    # Earnings filter
-    if has_earnings_soon(signal.symbol):
-        skip_reason = "earnings_soon"
-        logger.info(f"Signal skipped for {signal.symbol}: earnings soon")
-        database.log_signal(now, signal.symbol, signal.strategy, signal.side, False, skip_reason)
-        return
-
-    # Correlation filter (skip for pairs — they're inherently correlated)
-    if signal.strategy != "PAIRS":
-        open_symbols = list(risk.open_trades.keys())
-        if open_symbols and is_too_correlated(signal.symbol, open_symbols):
-            skip_reason = "high_correlation"
-            database.log_signal(now, signal.symbol, signal.strategy, signal.side, False, skip_reason)
-            return
-
-    # V4: Multi-timeframe confirmation
-    if mtf_confirmer and config.MTF_CONFIRMATION_ENABLED:
-        try:
-            confirmed = mtf_confirmer.confirm(
-                {"symbol": signal.symbol, "strategy": signal.strategy, "side": signal.side},
-                now,
-            )
-            if not confirmed:
-                skip_reason = "mtf_rejected"
-                database.log_signal(now, signal.symbol, signal.strategy, signal.side, False, skip_reason)
-                return
-        except Exception as e:
-            logger.warning(f"MTF confirmation error for {signal.symbol}: {e}")
-
-    # V4: News sentiment filter (skip for sector ETFs and pairs)
-    if news_filter and config.NEWS_FILTER_ENABLED and signal.strategy not in ("SECTOR_ROTATION", "PAIRS"):
-        try:
-            blocked, reason = news_filter.should_block(signal.symbol, signal.side)
-            if blocked:
-                skip_reason = f"news_{news_filter.get_sentiment(signal.symbol).lower()}"
-                database.log_signal(now, signal.symbol, signal.strategy, signal.side, False, skip_reason)
-                return
-        except Exception as e:
-            logger.warning(f"News filter error for {signal.symbol}: {e}")
-
-    # V3: ML signal filter
-    if config.USE_ML_FILTER and ml_filter and ml_filter._active.get(signal.strategy):
-        try:
-            features = extract_live_features(signal, regime, market_data or {})
-            prob = ml_filter.should_trade(signal.strategy, features)
-            if prob < config.ML_PROBABILITY_THRESHOLD:
-                skip_reason = f"ml_filter_{prob:.2f}"
-                logger.info(f"ML filter rejected {signal.symbol} ({signal.strategy}): prob={prob:.2f}")
-                database.log_signal(now, signal.symbol, signal.strategy, signal.side, False, skip_reason)
-                return
-        except Exception as e:
-            logger.warning(f"ML filter error for {signal.symbol}: {e}")
-
-    # V3: Relative strength filter
-    if config.USE_RS_FILTER and rs_tracker:
-        try:
-            rs_score = rs_tracker.score(signal.symbol)
-            if signal.side == "buy" and rs_score < config.RS_LONG_THRESHOLD:
-                skip_reason = f"rs_weak_{rs_score:.2f}"
-                database.log_signal(now, signal.symbol, signal.strategy, signal.side, False, skip_reason)
-                return
-            elif signal.side == "sell" and rs_score > config.RS_SHORT_THRESHOLD:
-                skip_reason = f"rs_strong_{rs_score:.2f}"
-                database.log_signal(now, signal.symbol, signal.strategy, signal.side, False, skip_reason)
-                return
-        except Exception as e:
-            logger.warning(f"RS filter error for {signal.symbol}: {e}")
-
-    # V3: Short selling pre-check
-    if signal.side == "sell":
-        if not config.ALLOW_SHORT:
-            skip_reason = "shorting_disabled"
-            database.log_signal(now, signal.symbol, signal.strategy, signal.side, False, skip_reason)
-            return
-        shortable, short_reason = can_short(signal.symbol, 1, signal.entry_price)
-        if not shortable:
-            skip_reason = f"short_blocked_{short_reason}"
-            database.log_signal(now, signal.symbol, signal.strategy, signal.side, False, skip_reason)
-            return
-
-    # V5: Shadow mode — log to shadow_trades instead of submitting real order
-    strategy_mode = config.STRATEGY_MODES.get(signal.strategy, "live")
-    if strategy_mode == "shadow":
-        try:
-            qty = risk.calculate_position_size(
-                signal.entry_price, signal.stop_loss, regime,
-                strategy=signal.strategy, side=signal.side,
-            )
-            if qty <= 0:
-                qty = 1  # Log at least 1 share for shadow tracking
-            time_stop = None
-            if signal.strategy == "VWAP":
-                time_stop = now + timedelta(minutes=config.VWAP_TIME_STOP_MINUTES)
-            elif signal.strategy == "EMA_SCALP":
-                time_stop = now + timedelta(minutes=config.EMA_SCALP_TIME_STOP_MINUTES)
-            database.log_shadow_entry(
-                symbol=signal.symbol,
-                strategy=signal.strategy,
-                side=signal.side,
-                entry_price=signal.entry_price,
-                qty=qty,
-                entry_time=now,
-                take_profit=signal.take_profit,
-                stop_loss=signal.stop_loss,
-            )
-            logger.info(
-                f"[SHADOW] {signal.side.upper()} {qty} {signal.symbol} "
-                f"@ {signal.entry_price:.2f} ({signal.strategy})"
-            )
-            database.log_signal(now, signal.symbol, signal.strategy, signal.side, True, "shadow")
-        except Exception as e:
-            logger.warning(f"Shadow trade log failed for {signal.symbol}: {e}")
-        return
-
-    # Check risk limits
-    allowed, reason = risk.can_open_trade(strategy=signal.strategy)
-    if not allowed:
-        skip_reason = reason
-        logger.info(f"Trade blocked for {signal.symbol}: {reason}")
-        database.log_signal(now, signal.symbol, signal.strategy, signal.side, False, skip_reason)
-        return
-
-    # Calculate position size (V3: strategy-weighted + short multiplier)
-    qty = risk.calculate_position_size(
-        signal.entry_price, signal.stop_loss, regime,
-        strategy=signal.strategy, side=signal.side,
-    )
-    if qty <= 0:
-        skip_reason = "position_size_zero"
-        logger.info(f"Position size 0 for {signal.symbol}, skipping")
-        database.log_signal(now, signal.symbol, signal.strategy, signal.side, False, skip_reason)
-        return
-
-    # Submit bracket order
-    order_id = submit_bracket_order(signal, qty)
-    if order_id is None:
-        skip_reason = "order_failed"
-        logger.error(f"Failed to submit order for {signal.symbol}, skipping (no naked entry)")
-        database.log_signal(now, signal.symbol, signal.strategy, signal.side, False, skip_reason)
-        return
-
-    # Register the trade
-    time_stop = None
-    max_hold_date = None
-    hold_type = getattr(signal, 'hold_type', 'day')
-
-    if signal.strategy == "VWAP":
-        time_stop = now + timedelta(minutes=config.VWAP_TIME_STOP_MINUTES)
-    elif signal.strategy == "MOMENTUM":
-        max_hold_date = now + timedelta(days=config.MOMENTUM_MAX_HOLD_DAYS)
-    elif signal.strategy == "GAP_GO":
-        time_stop = datetime.combine(now.date(), config.GAP_EXIT_TIME, tzinfo=config.ET)
-    elif signal.strategy == "SECTOR_ROTATION":
-        max_hold_date = now + timedelta(days=config.SECTOR_MAX_HOLD_DAYS)
-    elif signal.strategy == "PAIRS":
-        max_hold_date = now + timedelta(days=config.PAIRS_MAX_HOLD_DAYS)
-    elif signal.strategy == "EMA_SCALP":
-        time_stop = now + timedelta(minutes=config.EMA_SCALP_TIME_STOP_MINUTES)
-
-    trade = TradeRecord(
-        symbol=signal.symbol,
-        strategy=signal.strategy,
-        side=signal.side,
-        entry_price=signal.entry_price,
-        entry_time=now,
-        qty=qty,
-        take_profit=signal.take_profit,
-        stop_loss=signal.stop_loss,
-        order_id=order_id,
-        time_stop=time_stop,
-        hold_type=hold_type,
-        max_hold_date=max_hold_date,
-        pair_id=getattr(signal, 'pair_id', ''),
-        highest_price_seen=signal.entry_price,
-    )
-    risk.register_trade(trade)
-
-    # V3: Subscribe to WebSocket monitoring
-    if ws_monitor:
-        ws_monitor.subscribe(signal.symbol)
-
-    # V3: Telegram notification
-    if notifications and config.WHATSAPP_ENABLED:
-        try:
-            notifications.notify_trade_opened(trade)
-        except Exception as e:
-            logger.warning(f"Telegram notification failed: {e}")
-
-    # Log signal as acted on
-    database.log_signal(now, signal.symbol, signal.strategy, signal.side, True, "")
+    try:
+        account = get_account()
+        risk.update_equity(float(account.equity), float(account.cash))
+    except Exception as e:
+        logger.error(f"Failed to update account: {e}")
 
 
 def check_shadow_exits(now: datetime):
@@ -440,7 +181,6 @@ def check_shadow_exits(now: datetime):
 
     for shadow in open_shadows:
         try:
-            from data import get_snapshot
             snap = get_snapshot(shadow["symbol"])
             if not snap or not snap.latest_trade:
                 continue
@@ -455,7 +195,7 @@ def check_shadow_exits(now: datetime):
                     exit_reason = "take_profit"
                 elif price <= sl:
                     exit_reason = "stop_loss"
-            else:  # sell/short
+            else:
                 if price <= tp:
                     exit_reason = "take_profit"
                 elif price >= sl:
@@ -473,21 +213,235 @@ def check_shadow_exits(now: datetime):
             logger.warning(f"Shadow exit check failed for {shadow.get('symbol', '?')}: {e}")
 
 
-def sync_positions_with_broker(risk: RiskManager, now: datetime, ws_monitor=None):
-    """Sync open trades with actual broker positions to detect fills/stops."""
-    try:
-        broker_positions = {p.symbol: p for p in get_positions()}
-    except Exception as e:
-        logger.error(f"Failed to fetch positions: {e}")
+# ---------------------------------------------------------------------------
+# Signal processing (V6 — simplified)
+# ---------------------------------------------------------------------------
+
+def process_signals(
+    signals: list[Signal],
+    risk: RiskManager,
+    regime: str,
+    now: datetime,
+    vol_engine: VolatilityTargetingRiskEngine,
+    pnl_lock: DailyPnLLock,
+    ws_monitor=None,
+):
+    """Process signals: check filters, risk, size, and submit orders.
+
+    V6 filters kept: position conflict, earnings, correlation (skip for KALMAN_PAIRS),
+    short pre-check.  Removed: ML, RS, MTF, news, VIX halt, shadow mode.
+    """
+
+    # PnL lock check
+    if not pnl_lock.is_trading_allowed():
+        logger.info("PnL lock LOSS_HALT active -- skipping all signals")
+        for signal in signals:
+            database.log_signal(now, signal.symbol, signal.strategy, signal.side, False, "pnl_halt")
         return
 
-    for symbol in list(risk.open_trades.keys()):
-        if symbol not in broker_positions:
-            trade = risk.open_trades[symbol]
-            risk.close_trade(symbol, trade.entry_price, now, exit_reason="broker_sync")
-            logger.info(f"Position {symbol} no longer at broker — marking closed")
+    # Group pairs signals by pair_id for atomic processing
+    pair_groups: dict[str, list[Signal]] = {}
+    non_pair_signals: list[Signal] = []
+    for signal in signals:
+        if signal.pair_id:
+            pair_groups.setdefault(signal.pair_id, []).append(signal)
+        else:
+            non_pair_signals.append(signal)
 
-            # V3: Unsubscribe from WS and notify
+    # Process non-pair signals
+    for signal in non_pair_signals:
+        _process_single_signal(signal, risk, regime, now, vol_engine, pnl_lock, ws_monitor)
+
+    # Process pairs atomically (both legs or neither)
+    for pair_id, pair_signals in pair_groups.items():
+        if len(pair_signals) != 2:
+            logger.warning(f"Pair {pair_id} has {len(pair_signals)} signals, skipping")
+            continue
+
+        all_ok = True
+        for sig in pair_signals:
+            if sig.symbol in risk.open_trades:
+                all_ok = False
+                break
+            allowed, reason = risk.can_open_trade(strategy=sig.strategy)
+            if not allowed:
+                all_ok = False
+                break
+
+        if all_ok:
+            for sig in pair_signals:
+                _process_single_signal(sig, risk, regime, now, vol_engine, pnl_lock, ws_monitor)
+        else:
+            for sig in pair_signals:
+                database.log_signal(now, sig.symbol, sig.strategy, sig.side, False, "pair_blocked")
+
+
+def _process_single_signal(
+    signal: Signal,
+    risk: RiskManager,
+    regime: str,
+    now: datetime,
+    vol_engine: VolatilityTargetingRiskEngine,
+    pnl_lock: DailyPnLLock,
+    ws_monitor=None,
+):
+    """Process a single signal through V6 filters and submit if valid."""
+    skip_reason = ""
+
+    # 1. Position conflict
+    if signal.symbol in risk.open_trades:
+        skip_reason = "already_in_position"
+        database.log_signal(now, signal.symbol, signal.strategy, signal.side, False, skip_reason)
+        return
+
+    # 2. Earnings filter
+    if has_earnings_soon(signal.symbol):
+        skip_reason = "earnings_soon"
+        logger.info(f"Signal skipped for {signal.symbol}: earnings soon")
+        database.log_signal(now, signal.symbol, signal.strategy, signal.side, False, skip_reason)
+        return
+
+    # 3. Correlation filter (skip for KALMAN_PAIRS — they're inherently correlated)
+    if signal.strategy != "KALMAN_PAIRS":
+        open_symbols = list(risk.open_trades.keys())
+        if open_symbols and is_too_correlated(signal.symbol, open_symbols):
+            skip_reason = "high_correlation"
+            database.log_signal(now, signal.symbol, signal.strategy, signal.side, False, skip_reason)
+            return
+
+    # 4. Short selling pre-check
+    if signal.side == "sell":
+        if not config.ALLOW_SHORT:
+            skip_reason = "shorting_disabled"
+            database.log_signal(now, signal.symbol, signal.strategy, signal.side, False, skip_reason)
+            return
+        shortable, short_reason = can_short(signal.symbol, 1, signal.entry_price)
+        if not shortable:
+            skip_reason = f"short_blocked_{short_reason}"
+            database.log_signal(now, signal.symbol, signal.strategy, signal.side, False, skip_reason)
+            return
+
+    # 5. Check risk limits
+    allowed, reason = risk.can_open_trade(strategy=signal.strategy)
+    if not allowed:
+        skip_reason = reason
+        logger.info(f"Trade blocked for {signal.symbol}: {reason}")
+        database.log_signal(now, signal.symbol, signal.strategy, signal.side, False, skip_reason)
+        return
+
+    # 6. Position sizing via vol-targeting engine
+    vol_scalar = vol_engine.last_scalar
+    lock_mult = pnl_lock.get_size_multiplier()
+    qty = vol_engine.calculate_position_size(
+        equity=risk.current_equity,
+        entry_price=signal.entry_price,
+        stop_price=signal.stop_loss,
+        vol_scalar=vol_scalar,
+        strategy=signal.strategy,
+        side=signal.side,
+        pnl_lock_mult=lock_mult,
+    )
+    if qty <= 0:
+        skip_reason = "position_size_zero"
+        logger.info(f"Position size 0 for {signal.symbol}, skipping")
+        database.log_signal(now, signal.symbol, signal.strategy, signal.side, False, skip_reason)
+        return
+
+    # 7. Submit bracket order
+    order_id = submit_bracket_order(signal, qty)
+    if order_id is None:
+        skip_reason = "order_failed"
+        logger.error(f"Failed to submit order for {signal.symbol}, skipping (no naked entry)")
+        database.log_signal(now, signal.symbol, signal.strategy, signal.side, False, skip_reason)
+        return
+
+    # 8. Register the trade with V6 time stops / max hold
+    time_stop = None
+    max_hold_date = None
+    hold_type = getattr(signal, "hold_type", "day")
+
+    if signal.strategy == "STAT_MR":
+        # No fixed time stop — z-score exits handle it
+        pass
+    elif signal.strategy == "KALMAN_PAIRS":
+        max_hold_date = now + timedelta(days=config.PAIRS_MAX_HOLD_DAYS)
+    elif signal.strategy == "MICRO_MOM":
+        time_stop = now + timedelta(minutes=config.MICRO_MAX_HOLD_MINUTES)
+    elif signal.strategy == "BETA_HEDGE":
+        hold_type = "day"
+        # No time stop — held until EOD or beta re-balances
+
+    trade = TradeRecord(
+        symbol=signal.symbol,
+        strategy=signal.strategy,
+        side=signal.side,
+        entry_price=signal.entry_price,
+        entry_time=now,
+        qty=qty,
+        take_profit=signal.take_profit,
+        stop_loss=signal.stop_loss,
+        order_id=order_id,
+        time_stop=time_stop,
+        hold_type=hold_type,
+        max_hold_date=max_hold_date,
+        pair_id=getattr(signal, "pair_id", ""),
+        highest_price_seen=signal.entry_price,
+    )
+    risk.register_trade(trade)
+
+    # Subscribe to WebSocket monitoring
+    if ws_monitor:
+        ws_monitor.subscribe(signal.symbol)
+
+    # Notification
+    if notifications and config.WHATSAPP_ENABLED:
+        try:
+            notifications.notify_trade_opened(trade)
+        except Exception as e:
+            logger.warning(f"Notification failed: {e}")
+
+    # Log signal as acted on
+    database.log_signal(now, signal.symbol, signal.strategy, signal.side, True, "")
+
+
+# ---------------------------------------------------------------------------
+# V6 exit processing helper
+# ---------------------------------------------------------------------------
+
+def _handle_strategy_exits(exit_actions: list[dict], risk: RiskManager, now: datetime, ws_monitor=None):
+    """Process exit actions returned by strategy check_exits() methods.
+
+    Each action dict: {symbol, action, reason, ...}
+    action = "full" -> close_position, "partial" -> close_partial_position
+    """
+    for action in exit_actions:
+        symbol = action["symbol"]
+        if symbol not in risk.open_trades:
+            continue
+        trade = risk.open_trades[symbol]
+        reason = action.get("reason", "strategy_exit")
+
+        try:
+            snap = get_snapshot(symbol)
+            exit_price = float(snap.latest_trade.price) if snap and snap.latest_trade else trade.entry_price
+        except Exception:
+            exit_price = trade.entry_price
+
+        if action.get("action") == "partial":
+            partial_qty = action.get("qty", max(1, trade.qty // 2))
+            try:
+                close_partial_position(symbol, partial_qty)
+                logger.info(f"Partial exit {symbol}: {partial_qty} shares, reason={reason}")
+            except Exception as e:
+                logger.error(f"Partial close failed for {symbol}: {e}")
+        else:
+            # Full close
+            try:
+                close_position(symbol, reason=reason)
+            except Exception as e:
+                logger.error(f"Close failed for {symbol}: {e}")
+                continue
+            risk.close_trade(symbol, exit_price, now, exit_reason=reason)
             if ws_monitor:
                 ws_monitor.unsubscribe(symbol)
             if notifications and config.WHATSAPP_ENABLED:
@@ -496,21 +450,63 @@ def sync_positions_with_broker(risk: RiskManager, now: datetime, ws_monitor=None
                 except Exception:
                     pass
 
-    try:
-        account = get_account()
-        risk.update_equity(float(account.equity), float(account.cash))
-    except Exception as e:
-        logger.error(f"Failed to update account: {e}")
 
+# ---------------------------------------------------------------------------
+# WebSocket close callback
+# ---------------------------------------------------------------------------
+
+def _handle_ws_close(symbol: str, reason: str, risk: RiskManager, ws_monitor):
+    """Callback for WebSocket-triggered position closes."""
+    if symbol in risk.open_trades:
+        trade = risk.open_trades[symbol]
+        try:
+            close_position(symbol)
+        except Exception as e:
+            logger.error(f"WS close failed for {symbol}: {e}")
+            return
+        risk.close_trade(symbol, trade.entry_price, now_et(), exit_reason=reason)
+        ws_monitor.unsubscribe(symbol)
+
+        if notifications and config.WHATSAPP_ENABLED:
+            try:
+                notifications.notify_trade_closed(trade)
+            except Exception:
+                pass
+
+
+# ---------------------------------------------------------------------------
+# Fetch current prices for open positions
+# ---------------------------------------------------------------------------
+
+def _get_current_prices(open_trades: dict) -> dict[str, float]:
+    """Fetch current prices for open trades (for beta calculation etc.)."""
+    symbols = list(open_trades.keys())
+    if not symbols:
+        return {}
+    prices: dict[str, float] = {}
+    try:
+        snapshots = get_snapshots(symbols)
+        for sym, snap in snapshots.items():
+            if snap and snap.latest_trade:
+                prices[sym] = float(snap.latest_trade.price)
+    except Exception as e:
+        logger.warning(f"Price fetch failed: {e}")
+    # Fallback to entry price for any missing
+    for sym, trade in open_trades.items():
+        if sym not in prices:
+            prices[sym] = trade.entry_price
+    return prices
+
+
+# ===========================================================================
+# MAIN (synchronous mode)
+# ===========================================================================
 
 def main():
     """Main entry point."""
-    # Parse arguments
-    parser = argparse.ArgumentParser(description="Algo Trading Bot V5")
+    parser = argparse.ArgumentParser(description="Velox V6 Trading Bot")
     parser.add_argument("--backtest", action="store_true", help="Run backtesting engine")
     parser.add_argument("--walkforward", action="store_true", help="Run walk-forward test")
-    parser.add_argument("--train-ml", action="store_true", help="Train ML signal filter")
-    parser.add_argument("--optimize", action="store_true", help="Run parameter optimization")
     parser.add_argument("--live", action="store_true", help="Alias for ALPACA_LIVE=true")
     args = parser.parse_args()
 
@@ -532,23 +528,7 @@ def main():
         walk_forward_test()
         return
 
-    # Train ML mode
-    if args.train_ml:
-        database.init_db()
-        if ml_filter:
-            ml_filter.retrain_all()
-        else:
-            console.print("[red]ML filter module not available[/red]")
-        return
-
-    # Optimize mode
-    if args.optimize:
-        from optimizer import weekly_optimization
-        database.init_db()
-        weekly_optimization()
-        return
-
-    console.print("[bold cyan]Starting Algo Trading Bot V5...[/bold cyan]\n")
+    console.print("[bold cyan]Starting Velox V6 Trading Bot...[/bold cyan]\n")
 
     # Initialize database
     database.init_db()
@@ -557,87 +537,37 @@ def main():
     # Startup checks
     info = startup_checks()
 
-    # Initialize strategies
+    # --- V6 strategy initialization ---
+    stat_mr = StatMeanReversion()
+    kalman_pairs = KalmanPairsTrader()
+    micro_mom = IntradayMicroMomentum()
+
+    # V6 risk engine
+    vol_engine = VolatilityTargetingRiskEngine()
+    pnl_lock = DailyPnLLock()
+    beta_neutral = BetaNeutralizer()
+
+    # Regime detector (kept)
     regime_detector = MarketRegime()
-    orb = ORBStrategy()
-    vwap = VWAPStrategy()
-    momentum = MomentumStrategy()
-    gap_go = GapGoStrategy() if config.GAP_GO_ENABLED else None
+
+    # Risk manager (kept)
     risk = RiskManager()
-
-    # V4: Initialize sector rotation strategy
-    sector_rotation = None
-    if config.SECTOR_ROTATION_ENABLED and SectorRotationStrategy:
-        sector_rotation = SectorRotationStrategy()
-        console.print("[green]Sector Rotation strategy initialized.[/green]")
-
-    # V4: Initialize pairs trading strategy
-    pairs_trading = None
-    if config.PAIRS_TRADING_ENABLED and PairsTradingStrategy:
-        pairs_trading = PairsTradingStrategy()
-        console.print("[green]Pairs Trading strategy initialized.[/green]")
-
-    # V5: Initialize EMA Ribbon Scalper
-    ema_scalper = None
-    if config.EMA_SCALP_ENABLED and EMAScalper:
-        ema_scalper = EMAScalper()
-        console.print("[green]EMA Ribbon Scalper initialized.[/green]")
-
-    # V4: Initialize exit manager
-    exit_mgr = None
-    if config.ADVANCED_EXITS_ENABLED and ExitManager:
-        exit_mgr = ExitManager()
-        console.print("[green]Advanced exit manager initialized.[/green]")
-
-    # Initialize risk with account info
     risk.reset_daily(info["equity"], info["cash"])
-
-    # Load persisted state from DB
     risk.load_from_db()
 
-    # V3: Initialize relative strength tracker
-    rs_tracker = None
-    if config.USE_RS_FILTER and RelativeStrengthTracker:
-        rs_tracker = RelativeStrengthTracker()
-        console.print("[green]Relative strength tracker initialized.[/green]")
-
-    # V3: Load ML models
-    if config.USE_ML_FILTER and ml_filter:
-        try:
-            ml_filter.load_models()
-            active = [s for s, a in ml_filter._active.items() if a]
-            if active:
-                console.print(f"[green]ML filter loaded for: {', '.join(active)}[/green]")
-            else:
-                console.print("[yellow]ML filter: no trained models yet (need 100+ trades)[/yellow]")
-        except Exception as e:
-            console.print(f"[yellow]ML filter load failed: {e}[/yellow]")
-
-    # V3: Calculate initial strategy weights
-    if config.DYNAMIC_ALLOCATION:
-        try:
-            risk.update_strategy_weights()
-            weights = risk.get_strategy_weights()
-            if weights:
-                weight_str = ", ".join(f"{s}: {w:.0%}" for s, w in weights.items())
-                console.print(f"[green]Capital allocation: {weight_str}[/green]")
-        except Exception as e:
-            console.print(f"[yellow]Dynamic allocation init failed: {e}[/yellow]")
-
-    # V3: Start WebSocket position monitor
+    # WebSocket position monitor
     ws_monitor = None
     if config.WEBSOCKET_MONITORING and PositionMonitor:
         ws_monitor = PositionMonitor(risk)
         ws_monitor.set_close_callback(
             lambda symbol, reason: _handle_ws_close(symbol, reason, risk, ws_monitor)
         )
-        # Subscribe to existing open positions
         for symbol in risk.open_trades:
             ws_monitor.subscribe(symbol)
         ws_monitor.start()
         console.print("[green]WebSocket position monitor started.[/green]")
 
-    # V3: Start web dashboard
+    # Web dashboard
     if config.WEB_DASHBOARD_ENABLED:
         try:
             from web_dashboard import start_web_dashboard
@@ -646,21 +576,9 @@ def main():
         except Exception as e:
             console.print(f"[yellow]Web dashboard failed to start: {e}[/yellow]")
 
-    # V4: Print VIX status
-    if config.VIX_RISK_SCALING_ENABLED:
-        try:
-            from risk import get_vix_level, get_vix_risk_scalar as _scalar
-            vix = get_vix_level()
-            scalar = _scalar()
-            console.print(f"[green]VIX: {vix:.1f} (risk scalar: {scalar:.0%})[/green]")
-        except Exception as e:
-            console.print(f"[yellow]VIX fetch failed: {e}[/yellow]")
-
-    # V4: Print MTF/News status
-    if config.MTF_CONFIRMATION_ENABLED and mtf_confirmer:
-        console.print("[green]Multi-timeframe confirmation enabled.[/green]")
-    if config.NEWS_FILTER_ENABLED and news_filter:
-        console.print("[green]News sentiment filter enabled.[/green]")
+    # Notifications setup
+    if notifications and config.WHATSAPP_ENABLED:
+        console.print("[green]Notifications enabled.[/green]")
 
     # Load filters
     console.print("Loading earnings calendar...")
@@ -675,82 +593,47 @@ def main():
     except Exception as e:
         console.print(f"[yellow]Correlation filter load failed: {e} (continuing without)[/yellow]")
 
+    # --- Loop state ---
     start_time = now_et()
     last_scan = None
-    last_tier1_scan = None  # V5: Focus list scan timing
-    last_tier2_scan = None  # V5: Full universe scan timing
     last_state_save = now_et()
     last_analytics_update = now_et()
     last_day = now_et().date()
     eod_summary_printed = False
     current_analytics = None
-    gap_candidates_found = False
-    gap_first_candle_recorded = False
-    allocation_updated_today = False
-    health_check_done_today = False  # V5: morning strategy health check
-    last_sunday_task = None  # Track Sunday midnight ML/optimize/pairs runs
-    news_cache_cleared_today = False  # V4: track news cache clear
-    last_vix_alert_level = None  # V4: track VIX alert to avoid spam
+    universe_prepared_today = False
+    last_sunday_task = None
+    latest_consistency_score = 0.0
 
-    # Feature flags summary
-    features = []
-    if config.USE_ML_FILTER:
-        features.append("ML")
-    if config.DYNAMIC_ALLOCATION:
-        features.append("Alloc")
-    if config.WEBSOCKET_MONITORING:
-        features.append("WS")
+    # Feature flags (V6)
+    features = ["MR60%", "PAIRS25%", "MICRO15%"]
     if config.ALLOW_SHORT:
         features.append("Short")
-    if config.GAP_GO_ENABLED:
-        features.append("Gap")
-    if config.USE_RS_FILTER:
-        features.append("RS")
     if config.WHATSAPP_ENABLED:
-        features.append("TG")
+        features.append("Notify")
     if config.WEB_DASHBOARD_ENABLED:
         features.append("Web")
-    if config.AUTO_OPTIMIZE:
-        features.append("Opt")
-    if config.MTF_CONFIRMATION_ENABLED:
-        features.append("MTF")
-    if config.VIX_RISK_SCALING_ENABLED:
-        features.append("VIX")
-    if config.NEWS_FILTER_ENABLED:
-        features.append("News")
-    if config.SECTOR_ROTATION_ENABLED:
-        features.append("Sector")
-    if config.PAIRS_TRADING_ENABLED:
-        features.append("Pairs")
-    if config.ADVANCED_EXITS_ENABLED:
-        features.append("AdvExit")
+    if config.WEBSOCKET_MONITORING:
+        features.append("WS")
 
-    strategies_list = ["ORB", "VWAP"]
-    if config.ALLOW_MOMENTUM:
-        strategies_list.append("MOMENTUM")
-    if config.GAP_GO_ENABLED:
-        strategies_list.append("GAP_GO")
-    if config.SECTOR_ROTATION_ENABLED:
-        strategies_list.append("SECTOR_ROT")
-    if config.PAIRS_TRADING_ENABLED:
-        strategies_list.append("PAIRS")
-    if config.EMA_SCALP_ENABLED:
-        strategies_list.append("EMA_SCALP")
-        features.append("Scalp")
-
-    features_str = ", ".join(features) if features else "none"
-    console.print(f"\n[bold green]Bot V5 is running. Press Ctrl+C to stop.[/bold green]")
-    console.print(f"[dim]Strategies: {' + '.join(strategies_list)}[/dim]")
+    features_str = ", ".join(features)
+    console.print(f"\n[bold green]Velox V6 is running. Press Ctrl+C to stop.[/bold green]")
+    console.print(f"[dim]Strategies: STAT_MR + KALMAN_PAIRS + MICRO_MOM[/dim]")
     console.print(f"[dim]Features: {features_str}[/dim]\n")
 
-    # Stop logging to terminal — dashboard takes over
+    # Stop logging to terminal -- dashboard takes over
     logging.getLogger().removeHandler(_stream_handler)
 
     try:
         with Live(
-            build_dashboard(risk, regime_detector.regime, start_time, now_et(), last_scan,
-                          len(config.SYMBOLS), current_analytics, get_excluded_count(),
-                          risk.get_strategy_weights()),
+            build_dashboard(
+                risk, regime_detector.regime, start_time, now_et(), last_scan,
+                len(config.SYMBOLS), current_analytics,
+                pnl_lock_state=pnl_lock.state.value,
+                vol_scalar=vol_engine.last_scalar,
+                portfolio_beta=beta_neutral.portfolio_beta,
+                consistency_score=latest_consistency_score,
+            ),
             console=console,
             refresh_per_second=0.2,
             transient=False,
@@ -759,26 +642,17 @@ def main():
                 current = now_et()
                 current_time = current.time()
 
+                # -------------------------------------------------------
                 # Daily reset
+                # -------------------------------------------------------
                 if current.date() != last_day:
-                    logger.info("New trading day — resetting state")
-                    orb.reset_daily()
-                    vwap.reset_daily()
-                    momentum.reset_daily()
-                    if gap_go:
-                        gap_go.reset_daily()
-                    if sector_rotation:
-                        sector_rotation.reset_daily()
-                    if ema_scalper:
-                        ema_scalper.reset_daily()
-                    gap_candidates_found = False
-                    gap_first_candle_recorded = False
-                    allocation_updated_today = False
-                    health_check_done_today = False
-                    news_cache_cleared_today = False
-
-                    if rs_tracker:
-                        rs_tracker.clear_cache()
+                    logger.info("New trading day -- resetting state")
+                    stat_mr.reset_daily()
+                    micro_mom.reset_daily()
+                    pnl_lock.reset_daily()
+                    beta_neutral.reset_daily()
+                    # kalman_pairs.reset_daily() -- does nothing (pairs persist weekly)
+                    universe_prepared_today = False
 
                     try:
                         account = get_account()
@@ -795,333 +669,159 @@ def main():
                     except Exception as e:
                         logger.error(f"Failed to refresh daily caches: {e}")
 
-                # V4: News cache clear at 9:25 AM
-                if (not news_cache_cleared_today
-                        and news_filter
-                        and current_time >= config.NEWS_CACHE_CLEAR_TIME):
-                    news_filter.clear_cache()
-                    news_cache_cleared_today = True
-
-                # Sunday midnight tasks (ML retrain + optimization + pairs discovery)
+                # -------------------------------------------------------
+                # Sunday tasks — weekly pair selection
+                # -------------------------------------------------------
                 if (current.weekday() == 6 and current_time >= time(0, 0)
                         and last_sunday_task != current.date()):
                     last_sunday_task = current.date()
+                    try:
+                        logger.info("Sunday: selecting cointegrated pairs...")
+                        kalman_pairs.select_pairs_weekly(current)
+                    except Exception as e:
+                        logger.error(f"Weekly pair selection failed: {e}")
 
-                    if config.USE_ML_FILTER and ml_filter:
-                        try:
-                            logger.info("Sunday: retraining ML models...")
-                            ml_filter.retrain_all()
-                            if notifications and config.WHATSAPP_ENABLED:
-                                notifications.notify_ml_retrain(ml_filter._active)
-                        except Exception as e:
-                            logger.error(f"ML retrain failed: {e}")
-
-                    if config.AUTO_OPTIMIZE:
-                        try:
-                            logger.info("Sunday: running parameter optimization...")
-                            from optimizer import weekly_optimization
-                            weekly_optimization()
-                        except Exception as e:
-                            logger.error(f"Parameter optimization failed: {e}")
-
-                    # V4: Pairs trading weekly discovery + revalidation
-                    if pairs_trading and config.PAIRS_TRADING_ENABLED:
-                        try:
-                            logger.info("Sunday: discovering cointegrated pairs...")
-                            pairs_trading.discover_pairs(config.STANDARD_SYMBOLS, current)
-                            pairs_trading.revalidate_pairs()
-                        except Exception as e:
-                            logger.error(f"Pairs discovery failed: {e}")
-
+                # -------------------------------------------------------
                 # Update regime
+                # -------------------------------------------------------
                 regime = regime_detector.update(current)
 
-                # V3: Update RS tracker periodically
-                if rs_tracker and is_market_hours(current_time):
-                    try:
-                        rs_tracker.update(current)
-                    except Exception as e:
-                        logger.warning(f"RS tracker update failed: {e}")
-
-                # V3: Daily capital allocation update at 9:00 AM
-                if (config.DYNAMIC_ALLOCATION
-                        and not allocation_updated_today
-                        and current_time >= config.ALLOCATION_RECALC_TIME):
-                    try:
-                        risk.update_strategy_weights()
-                        allocation_updated_today = True
-                    except Exception as e:
-                        logger.error(f"Failed to update strategy weights: {e}")
-
-                # V5: Morning strategy health check at 9:00 AM
-                if (config.MORNING_HEALTH_CHECK_ENABLED
-                        and quick_recent_backtest
-                        and not health_check_done_today
-                        and current_time >= config.MORNING_HEALTH_CHECK_TIME):
-                    health_check_done_today = True
-                    for strat_name in ["ORB", "VWAP", "MOMENTUM"]:
-                        try:
-                            result = quick_recent_backtest(strat_name, days=config.HEALTH_CHECK_LOOKBACK_DAYS)
-                            if (result.get("total_trades", 0) >= config.HEALTH_CHECK_MIN_TRADES
-                                    and result.get("sharpe_ratio", 1.0) < config.HEALTH_CHECK_MIN_SHARPE):
-                                config.STRATEGY_MODES[strat_name] = "shadow"
-                                logger.warning(
-                                    f"Health check: demoting {strat_name} to shadow "
-                                    f"(Sharpe={result['sharpe_ratio']:.2f})"
-                                )
-                                if notifications and config.WHATSAPP_ENABLED:
-                                    try:
-                                        notifications.notify_strategy_demoted(
-                                            strat_name, result["sharpe_ratio"]
-                                        )
-                                    except Exception:
-                                        pass
-                        except Exception as e:
-                            logger.warning(f"Health check failed for {strat_name}: {e}")
-
-                # V4: VIX alert notifications
-                if config.VIX_RISK_SCALING_ENABLED and notifications and config.WHATSAPP_ENABLED:
-                    try:
-                        from risk import get_vix_level as _gvl
-                        vix = _gvl()
-                        scalar = get_vix_risk_scalar()
-                        alert_level = None
-                        if vix >= 40:
-                            alert_level = "extreme"
-                        elif vix >= 30:
-                            alert_level = "high"
-                        elif vix >= 25:
-                            alert_level = "elevated"
-                        if alert_level and alert_level != last_vix_alert_level:
-                            notifications.notify_vix_alert(vix, scalar)
-                            last_vix_alert_level = alert_level
-                        elif vix < 25:
-                            last_vix_alert_level = None
-                    except Exception:
-                        pass
-
+                # -------------------------------------------------------
                 # Market hours logic
+                # -------------------------------------------------------
                 if is_market_hours(current_time):
 
-                    # V3: Gap & Go pre-market scan at 9:00 AM
-                    if (gap_go and not gap_candidates_found
-                            and current_time >= config.GAP_PREMARKET_SCAN_TIME):
+                    # 9:00 AM tasks: universe prep + Monday pair selection
+                    if not universe_prepared_today and current_time >= config.MR_UNIVERSE_PREP_TIME:
                         try:
-                            gap_go.find_gap_candidates(config.SYMBOLS, current)
-                            gap_candidates_found = True
-                            logger.info(f"Gap & Go: found {len(gap_go.candidates)} candidates")
+                            stat_mr.prepare_universe(config.STANDARD_SYMBOLS, current)
+                            universe_prepared_today = True
+                            logger.info(f"MR universe prepared: {len(stat_mr.universe)} symbols")
                         except Exception as e:
-                            logger.error(f"Gap & Go pre-market scan failed: {e}")
+                            logger.error(f"MR universe prep failed: {e}")
 
-                    # ORB recording period (9:30-10:00)
-                    if is_orb_recording_period(current_time):
-                        if not orb.ranges_recorded and current_time >= time(9, 55):
-                            orb.record_opening_ranges(config.STANDARD_SYMBOLS, current)
-
-                        # V3: Gap & Go first candle recording at 9:45
-                        if (gap_go and not gap_first_candle_recorded
-                                and current_time >= time(9, 45)):
+                        # Monday: refresh pairs
+                        if current.weekday() == 0:
                             try:
-                                gap_go.record_first_candle(current)
-                                gap_first_candle_recorded = True
+                                kalman_pairs.select_pairs_weekly(current)
+                                logger.info(f"Monday pair selection: {len(kalman_pairs.active_pairs)} pairs")
                             except Exception as e:
-                                logger.error(f"Gap & Go first candle record failed: {e}")
+                                logger.error(f"Monday pair selection failed: {e}")
 
-                    # Trading hours (10:00-15:45)
+                    # Trading hours scan
                     if is_trading_hours(current_time):
-                        signals = []
+                        # 1. Update PnL lock state
+                        pnl_lock.update(risk.day_pnl)
 
-                        # V5: Two-tier scanning
-                        tier1_due = (last_tier1_scan is None
-                                     or (current - last_tier1_scan).total_seconds() >= config.TIER1_SCAN_INTERVAL_SEC)
-                        tier2_due = (last_tier2_scan is None
-                                     or (current - last_tier2_scan).total_seconds() >= config.TIER2_SCAN_INTERVAL_SEC)
+                        # 2. Detect micro momentum events
+                        try:
+                            micro_mom.detect_event(current)
+                        except Exception as e:
+                            logger.error(f"Micro event detection failed: {e}")
 
-                        # Determine which symbols to scan this cycle
-                        focus_set = set(config.FOCUS_LIST)
-                        orb_tier1 = [s for s in config.STANDARD_SYMBOLS if s in focus_set]
-                        orb_tier2 = [s for s in config.STANDARD_SYMBOLS if s not in focus_set]
-                        vwap_tier1 = [s for s in config.SYMBOLS if s in focus_set]
-                        vwap_tier2 = [s for s in config.SYMBOLS if s not in focus_set]
+                        # 3. Scan all three strategies
+                        signals: list[Signal] = []
 
-                        orb_symbols_now = []
-                        vwap_symbols_now = []
-                        if tier1_due:
-                            orb_symbols_now.extend(orb_tier1)
-                            vwap_symbols_now.extend(vwap_tier1)
-                            last_tier1_scan = current
-                        if tier2_due:
-                            orb_symbols_now.extend(orb_tier2)
-                            vwap_symbols_now.extend(vwap_tier2)
-                            last_tier2_scan = current
+                        try:
+                            mr_signals = stat_mr.scan(current, regime)
+                            signals.extend(mr_signals)
+                        except Exception as e:
+                            logger.error(f"StatMR scan failed: {e}")
 
-                        # Run strategies based on regime
-                        if orb_symbols_now:
-                            if regime in ("BULLISH", "UNKNOWN"):
-                                orb_signals = orb.scan(orb_symbols_now, current)
-                                signals.extend(orb_signals)
+                        try:
+                            pair_signals = kalman_pairs.scan(current, regime)
+                            signals.extend(pair_signals)
+                        except Exception as e:
+                            logger.error(f"KalmanPairs scan failed: {e}")
 
-                            # V3: ORB short signals in bearish regime
-                            if config.ALLOW_SHORT and regime in ("BEARISH", "UNKNOWN"):
-                                orb_short_signals = orb.scan(orb_symbols_now, current, regime=regime)
-                                for sig in orb_short_signals:
-                                    if sig.side == "sell" and sig.symbol not in [s.symbol for s in signals]:
-                                        signals.append(sig)
-
-                        # VWAP runs on all symbols in all regimes
-                        if vwap_symbols_now:
-                            vwap_signals = vwap.scan(vwap_symbols_now, current, regime)
-                            signals.extend(vwap_signals)
-
-                        # Momentum: once daily at 10:30 AM
-                        if (config.ALLOW_MOMENTUM
-                            and current_time >= config.MOMENTUM_SCAN_TIME
-                            and not momentum.scanned_today):
-                            mom_signals = momentum.scan(
-                                config.STANDARD_SYMBOLS, current, regime_detector
+                        try:
+                            micro_signals = micro_mom.scan(
+                                current, day_pnl_pct=risk.day_pnl, regime=regime
                             )
-                            signals.extend(mom_signals)
+                            signals.extend(micro_signals)
+                        except Exception as e:
+                            logger.error(f"MicroMom scan failed: {e}")
 
-                        # V3: Gap & Go scan (9:45-11:30)
-                        if (gap_go and gap_first_candle_recorded
-                                and current_time >= config.GAP_ENTRY_TIME
-                                and current_time < config.GAP_EXIT_TIME):
-                            try:
-                                gap_signals = gap_go.scan(current)
-                                signals.extend(gap_signals)
-                            except Exception as e:
-                                logger.error(f"Gap & Go scan failed: {e}")
-
-                        # V4: Sector Rotation scan at 10:30 AM
-                        if (sector_rotation and config.SECTOR_ROTATION_ENABLED
-                                and current_time >= config.SECTOR_SCAN_TIME
-                                and not sector_rotation.scanned_today):
-                            try:
-                                sector_signals = sector_rotation.scan(
-                                    config.SECTOR_ROTATION_ETFS, current, regime_detector
-                                )
-                                signals.extend(sector_signals)
-                            except Exception as e:
-                                logger.error(f"Sector Rotation scan failed: {e}")
-
-                        # V4: Pairs Trading intraday scan
-                        if pairs_trading and config.PAIRS_TRADING_ENABLED and pairs_trading.pairs:
-                            try:
-                                pair_signals = pairs_trading.scan(
-                                    config.STANDARD_SYMBOLS, current
-                                )
-                                signals.extend(pair_signals)
-                            except Exception as e:
-                                logger.error(f"Pairs Trading scan failed: {e}")
-
-                        # V5: EMA Ribbon Scalper (Tier 1 only — FOCUS_LIST)
-                        if ema_scalper and tier1_due:
-                            try:
-                                ema_signals = ema_scalper.scan(
-                                    config.FOCUS_LIST, current, regime
-                                )
-                                signals.extend(ema_signals)
-                            except Exception as e:
-                                logger.error(f"EMA Scalper scan failed: {e}")
-
-                        # Process signals
+                        # 4. Process signals
                         if signals:
                             process_signals(
                                 signals, risk, regime, current,
-                                rs_tracker=rs_tracker,
-                                ws_monitor=ws_monitor,
+                                vol_engine, pnl_lock, ws_monitor,
                             )
 
-                        # V4: Advanced exit checks
-                        if exit_mgr:
-                            try:
-                                exit_actions = exit_mgr.check_exits(risk, current)
-                                for action in exit_actions:
-                                    if ws_monitor and action["symbol"] not in risk.open_trades:
-                                        ws_monitor.unsubscribe(action["symbol"])
-                            except Exception as e:
-                                logger.error(f"Exit manager check failed: {e}")
+                        # 5. Check strategy exits
+                        try:
+                            mr_exits = stat_mr.check_exits(risk.open_trades, current)
+                            if mr_exits:
+                                _handle_strategy_exits(mr_exits, risk, current, ws_monitor)
+                        except Exception as e:
+                            logger.error(f"StatMR exit check failed: {e}")
 
-                        # Check VWAP time stops
-                        expired = check_vwap_time_stops(risk.open_trades, current)
-                        for symbol in expired:
-                            if symbol in risk.open_trades:
-                                risk.close_trade(symbol, risk.open_trades[symbol].entry_price, current, exit_reason="time_stop")
-                                if ws_monitor:
-                                    ws_monitor.unsubscribe(symbol)
+                        try:
+                            pair_exits = kalman_pairs.check_exits(risk.open_trades, current)
+                            if pair_exits:
+                                _handle_strategy_exits(pair_exits, risk, current, ws_monitor)
+                        except Exception as e:
+                            logger.error(f"KalmanPairs exit check failed: {e}")
 
-                        # Check momentum max hold
-                        expired_mom = check_momentum_max_hold(risk.open_trades, current)
-                        for symbol in expired_mom:
-                            if symbol in risk.open_trades:
-                                risk.close_trade(symbol, risk.open_trades[symbol].entry_price, current, exit_reason="max_hold")
-                                if ws_monitor:
-                                    ws_monitor.unsubscribe(symbol)
+                        try:
+                            micro_exits = micro_mom.check_exits(risk.open_trades, current)
+                            if micro_exits:
+                                _handle_strategy_exits(micro_exits, risk, current, ws_monitor)
+                        except Exception as e:
+                            logger.error(f"MicroMom exit check failed: {e}")
 
-                        # V3: Gap & Go time stop at 11:30
-                        if gap_go and current_time >= config.GAP_EXIT_TIME:
-                            closed_gaps = close_gap_go_positions(risk.open_trades, current)
-                            for symbol in closed_gaps:
-                                if symbol in risk.open_trades:
-                                    risk.close_trade(symbol, risk.open_trades[symbol].entry_price, current, exit_reason="gap_time_stop")
-                                    if ws_monitor:
-                                        ws_monitor.unsubscribe(symbol)
+                        # 6. Beta neutralization (every BETA_CHECK_INTERVAL_MIN)
+                        if beta_neutral.should_check_now(current):
+                            if not beta_neutral.should_skip(current):
+                                try:
+                                    prices = _get_current_prices(risk.open_trades)
+                                    beta = beta_neutral.compute_portfolio_beta(risk.open_trades, prices)
+                                    if beta_neutral.needs_hedge():
+                                        spy_price = prices.get("SPY")
+                                        if not spy_price:
+                                            try:
+                                                snap = get_snapshot("SPY")
+                                                spy_price = float(snap.latest_trade.price) if snap and snap.latest_trade else None
+                                            except Exception:
+                                                spy_price = None
+                                        if spy_price:
+                                            hedge_signal = beta_neutral.compute_hedge_signal(
+                                                risk.current_equity, spy_price
+                                            )
+                                            if hedge_signal:
+                                                process_signals(
+                                                    [hedge_signal], risk, regime, current,
+                                                    vol_engine, pnl_lock, ws_monitor,
+                                                )
+                                except Exception as e:
+                                    logger.error(f"Beta neutralization failed: {e}")
 
-                        # V4: Sector rotation max hold
-                        if sector_rotation and config.SECTOR_ROTATION_ENABLED:
-                            expired_sector = check_sector_max_hold(risk.open_trades, current)
-                            for symbol in expired_sector:
-                                if symbol in risk.open_trades:
-                                    risk.close_trade(symbol, risk.open_trades[symbol].entry_price, current, exit_reason="sector_max_hold")
-                                    if ws_monitor:
-                                        ws_monitor.unsubscribe(symbol)
-                                    if symbol in sector_rotation.held_sectors:
-                                        del sector_rotation.held_sectors[symbol]
-
-                        # V4: Pairs max hold + z-score exits
-                        if pairs_trading and config.PAIRS_TRADING_ENABLED:
-                            expired_pairs = check_pairs_max_hold(risk.open_trades, current)
-                            for symbol in expired_pairs:
-                                if symbol in risk.open_trades:
-                                    risk.close_trade(symbol, risk.open_trades[symbol].entry_price, current, exit_reason="pairs_max_hold")
-                                    if ws_monitor:
-                                        ws_monitor.unsubscribe(symbol)
-
-                            # Z-score convergence/divergence exits
-                            try:
-                                zscore_exits = pairs_trading.check_pair_exits(risk.open_trades, current)
-                                for symbol in zscore_exits:
-                                    if symbol in risk.open_trades:
-                                        from data import get_snapshot
-                                        try:
-                                            snap = get_snapshot(symbol)
-                                            exit_price = float(snap.latest_trade.price) if snap and snap.latest_trade else risk.open_trades[symbol].entry_price
-                                        except Exception:
-                                            exit_price = risk.open_trades[symbol].entry_price
-                                        close_position(symbol, reason="pairs_zscore_exit")
-                                        risk.close_trade(symbol, exit_price, current, exit_reason="pairs_zscore_exit")
-                                        if ws_monitor:
-                                            ws_monitor.unsubscribe(symbol)
-                            except Exception as e:
-                                logger.error(f"Pairs z-score exit check failed: {e}")
-
-                        # V5: Check shadow trade exits
+                        # Check shadow exits
                         check_shadow_exits(current)
 
-                    # ORB exit time (15:45)
+                    # EOD close for day-hold positions at ORB_EXIT_TIME
                     if current_time >= config.ORB_EXIT_TIME:
-                        closed = close_orb_positions(risk.open_trades, current)
-                        for symbol in closed:
-                            if symbol in risk.open_trades:
-                                risk.close_trade(symbol, risk.open_trades[symbol].entry_price, current, exit_reason="eod_close")
-                                if ws_monitor:
-                                    ws_monitor.unsubscribe(symbol)
+                        for symbol in list(risk.open_trades.keys()):
+                            trade = risk.open_trades[symbol]
+                            if trade.hold_type == "day" and trade.strategy in ("MICRO_MOM", "BETA_HEDGE"):
+                                try:
+                                    close_position(symbol, reason="eod_close")
+                                    try:
+                                        snap = get_snapshot(symbol)
+                                        ep = float(snap.latest_trade.price) if snap and snap.latest_trade else trade.entry_price
+                                    except Exception:
+                                        ep = trade.entry_price
+                                    risk.close_trade(symbol, ep, current, exit_reason="eod_close")
+                                    if ws_monitor:
+                                        ws_monitor.unsubscribe(symbol)
+                                except Exception as e:
+                                    logger.error(f"EOD close failed for {symbol}: {e}")
 
-                    # Sync with broker (use polling if WS not connected)
+                    # Sync with broker
                     if not (ws_monitor and ws_monitor.is_connected):
                         sync_positions_with_broker(risk, current, ws_monitor)
                     else:
-                        # Still update equity from account
                         try:
                             account = get_account()
                             risk.update_equity(float(account.equity), float(account.cash))
@@ -1138,20 +838,21 @@ def main():
 
                     last_scan = current
 
-                # EOD summary + daily snapshot at 16:15
+                # -------------------------------------------------------
+                # EOD summary at EOD_SUMMARY_TIME
+                # -------------------------------------------------------
                 if current_time >= config.EOD_SUMMARY_TIME and not eod_summary_printed:
                     summary = risk.get_day_summary()
-                    print_day_summary(summary)
+                    print_day_summary(summary, consistency_score=latest_consistency_score)
                     logger.info(f"Day summary: {summary}")
 
-                    # V3: Telegram daily summary
                     if notifications and config.WHATSAPP_ENABLED:
                         try:
                             notifications.notify_daily_summary(summary, risk.current_equity)
                         except Exception as e:
-                            logger.warning(f"Telegram daily summary failed: {e}")
+                            logger.warning(f"Daily summary notification failed: {e}")
 
-                    # Save daily snapshot to DB
+                    # Save daily snapshot
                     try:
                         wr = summary.get("win_rate", 0) if summary.get("trades", 0) > 0 else 0
                         database.save_daily_snapshot(
@@ -1167,9 +868,31 @@ def main():
                     except Exception as e:
                         logger.error(f"Failed to save daily snapshot: {e}")
 
+                    # Compute and save consistency score
+                    try:
+                        daily_pnls = database.get_daily_pnl_series(days=30)
+                        sharpe = current_analytics.get("sharpe_7d", 0) if current_analytics else 0
+                        max_dd = current_analytics.get("max_drawdown", 0) if current_analytics else 0
+                        latest_consistency_score = compute_consistency_score(daily_pnls, sharpe, max_dd)
+                        pct_positive = sum(1 for p in daily_pnls if p > 0) / max(len(daily_pnls), 1)
+                        database.save_consistency_log(
+                            date=current.strftime("%Y-%m-%d"),
+                            consistency_score=latest_consistency_score,
+                            pct_positive=pct_positive,
+                            sharpe=sharpe,
+                            max_drawdown=max_dd,
+                            vol_scalar_avg=vol_engine.last_scalar,
+                            beta_avg=beta_neutral.portfolio_beta,
+                        )
+                        logger.info(f"Consistency score: {latest_consistency_score:.1f}")
+                    except Exception as e:
+                        logger.error(f"Consistency score computation failed: {e}")
+
                     eod_summary_printed = True
 
-                # Save state to DB periodically
+                # -------------------------------------------------------
+                # Save state periodically
+                # -------------------------------------------------------
                 if (current - last_state_save).total_seconds() >= config.STATE_SAVE_INTERVAL_SEC:
                     try:
                         database.save_open_positions(risk.open_trades)
@@ -1177,12 +900,12 @@ def main():
                         logger.error(f"Failed to save state: {e}")
                     last_state_save = current
 
+                # -------------------------------------------------------
                 # Update analytics every 5 minutes
+                # -------------------------------------------------------
                 if (current - last_analytics_update).total_seconds() >= 300:
                     try:
                         current_analytics = analytics_mod.compute_analytics()
-
-                        # V3: Drawdown warning
                         if current_analytics and notifications and config.WHATSAPP_ENABLED:
                             dd = current_analytics.get("max_drawdown", 0)
                             if dd > 0.05:
@@ -1194,17 +917,41 @@ def main():
                         logger.error(f"Failed to compute analytics: {e}")
                     last_analytics_update = current
 
+                # -------------------------------------------------------
+                # Update vol scalar periodically (every analytics cycle)
+                # -------------------------------------------------------
+                try:
+                    from risk import get_vix_level
+                    vix = get_vix_level()
+                    pnl_series = database.get_daily_pnl_series(days=20)
+                    if np is not None and len(pnl_series) > 2:
+                        rolling_std = float(np.std(pnl_series))
+                    else:
+                        rolling_std = 0.01
+                    vol_engine.compute_vol_scalar(
+                        vix=vix,
+                        portfolio_atr_vol=0.01,  # Simplified; could compute from positions
+                        rolling_pnl_std=rolling_std,
+                    )
+                except Exception:
+                    pass  # Vol scalar stays at last value
+
+                # -------------------------------------------------------
                 # Update dashboard
+                # -------------------------------------------------------
                 live.update(
                     build_dashboard(
                         risk, regime, start_time, current, last_scan,
-                        len(config.SYMBOLS), current_analytics, get_excluded_count(),
-                        risk.get_strategy_weights(),
+                        len(config.SYMBOLS), current_analytics,
+                        pnl_lock_state=pnl_lock.state.value,
+                        vol_scalar=vol_engine.last_scalar,
+                        portfolio_beta=beta_neutral.portfolio_beta,
+                        consistency_score=latest_consistency_score,
                     )
                 )
 
-                # Sleep until next scan (V5: use tier1 interval for faster focus list scanning)
-                time_mod.sleep(config.TIER1_SCAN_INTERVAL_SEC)
+                # Sleep until next scan
+                time_mod.sleep(config.SCAN_INTERVAL_SEC)
 
     except KeyboardInterrupt:
         console.print("\n[yellow]Shutting down gracefully...[/yellow]")
@@ -1228,36 +975,16 @@ def main():
         sys.exit(1)
 
 
-def _handle_ws_close(symbol: str, reason: str, risk: RiskManager, ws_monitor):
-    """Callback for WebSocket-triggered position closes."""
-    if symbol in risk.open_trades:
-        trade = risk.open_trades[symbol]
-        try:
-            close_position(symbol)
-        except Exception as e:
-            logger.error(f"WS close failed for {symbol}: {e}")
-            return
-        risk.close_trade(symbol, trade.entry_price, now_et(), exit_reason=reason)
-        ws_monitor.unsubscribe(symbol)
-
-        if notifications and config.WHATSAPP_ENABLED:
-            try:
-                notifications.notify_trade_closed(trade)
-            except Exception:
-                pass
-
-
-# ===================================================================
-# Async Mode — behind ASYNC_MODE flag
-# ===================================================================
+# ===========================================================================
+# ASYNC MODE
+# ===========================================================================
 
 async def _async_scanner(
-    risk, regime_detector, orb, vwap, momentum, gap_go,
-    sector_rotation, pairs_trading, rs_tracker, ws_monitor,
+    risk, regime_detector, stat_mr, kalman_pairs, micro_mom,
+    vol_engine, pnl_lock, beta_neutral, ws_monitor,
 ):
-    """Async task: scan for signals and process them every SCAN_INTERVAL_SEC."""
-    gap_candidates_found = False
-    gap_first_candle_recorded = False
+    """Async task: scan for V6 signals and process them every SCAN_INTERVAL_SEC."""
+    universe_prepared_today = False
 
     while True:
         try:
@@ -1266,62 +993,52 @@ async def _async_scanner(
             regime = regime_detector.regime
 
             if is_market_hours(ct):
-                # Gap & Go pre-market scan
-                if gap_go and not gap_candidates_found and ct >= config.GAP_PREMARKET_SCAN_TIME:
+                # 9:00 AM universe prep
+                if not universe_prepared_today and ct >= config.MR_UNIVERSE_PREP_TIME:
                     try:
-                        gap_go.find_gap_candidates(config.SYMBOLS, current)
-                        gap_candidates_found = True
+                        stat_mr.prepare_universe(config.STANDARD_SYMBOLS, current)
+                        universe_prepared_today = True
                     except Exception as e:
-                        logger.error(f"[async] Gap scan failed: {e}")
+                        logger.error(f"[async] MR universe prep failed: {e}")
 
-                # ORB recording
-                if is_orb_recording_period(ct):
-                    if not orb.ranges_recorded and ct >= time(9, 55):
-                        orb.record_opening_ranges(config.STANDARD_SYMBOLS, current)
-                    if gap_go and not gap_first_candle_recorded and ct >= time(9, 45):
+                    if current.weekday() == 0:
                         try:
-                            gap_go.record_first_candle(current)
-                            gap_first_candle_recorded = True
+                            kalman_pairs.select_pairs_weekly(current)
                         except Exception as e:
-                            logger.error(f"[async] Gap first candle failed: {e}")
+                            logger.error(f"[async] Monday pair selection failed: {e}")
 
                 # Trading hours
                 if is_trading_hours(ct):
-                    signals = []
-                    if regime in ("BULLISH", "UNKNOWN"):
-                        signals.extend(orb.scan(config.STANDARD_SYMBOLS, current))
-                    if config.ALLOW_SHORT and regime in ("BEARISH", "UNKNOWN"):
-                        for sig in orb.scan(config.STANDARD_SYMBOLS, current, regime=regime):
-                            if sig.side == "sell" and sig.symbol not in [s.symbol for s in signals]:
-                                signals.append(sig)
-                    signals.extend(vwap.scan(config.SYMBOLS, current, regime))
-                    if (config.ALLOW_MOMENTUM and ct >= config.MOMENTUM_SCAN_TIME
-                            and not momentum.scanned_today):
-                        signals.extend(momentum.scan(config.STANDARD_SYMBOLS, current, regime_detector))
-                    if gap_go and gap_first_candle_recorded and ct >= config.GAP_ENTRY_TIME and ct < config.GAP_EXIT_TIME:
-                        try:
-                            signals.extend(gap_go.scan(current))
-                        except Exception as e:
-                            logger.error(f"[async] Gap scan failed: {e}")
-                    if sector_rotation and config.SECTOR_ROTATION_ENABLED and ct >= config.SECTOR_SCAN_TIME and not sector_rotation.scanned_today:
-                        try:
-                            signals.extend(sector_rotation.scan(config.SECTOR_ROTATION_ETFS, current, regime_detector))
-                        except Exception as e:
-                            logger.error(f"[async] Sector scan failed: {e}")
-                    if pairs_trading and config.PAIRS_TRADING_ENABLED and pairs_trading.pairs:
-                        try:
-                            signals.extend(pairs_trading.scan(config.STANDARD_SYMBOLS, current))
-                        except Exception as e:
-                            logger.error(f"[async] Pairs scan failed: {e}")
+                    pnl_lock.update(risk.day_pnl)
+
+                    try:
+                        micro_mom.detect_event(current)
+                    except Exception as e:
+                        logger.error(f"[async] Micro event detection failed: {e}")
+
+                    signals: list[Signal] = []
+                    try:
+                        signals.extend(stat_mr.scan(current, regime))
+                    except Exception as e:
+                        logger.error(f"[async] StatMR scan failed: {e}")
+                    try:
+                        signals.extend(kalman_pairs.scan(current, regime))
+                    except Exception as e:
+                        logger.error(f"[async] KalmanPairs scan failed: {e}")
+                    try:
+                        signals.extend(micro_mom.scan(current, day_pnl_pct=risk.day_pnl, regime=regime))
+                    except Exception as e:
+                        logger.error(f"[async] MicroMom scan failed: {e}")
 
                     if signals:
-                        process_signals(signals, risk, regime, current,
-                                        rs_tracker=rs_tracker, ws_monitor=ws_monitor)
+                        process_signals(
+                            signals, risk, regime, current,
+                            vol_engine, pnl_lock, ws_monitor,
+                        )
 
-            # Daily reset for gap tracking
+            # Reset universe tracking at day boundary
             if ct < config.MARKET_OPEN:
-                gap_candidates_found = False
-                gap_first_candle_recorded = False
+                universe_prepared_today = False
 
         except Exception as e:
             logger.error(f"[async] Scanner error: {e}", exc_info=True)
@@ -1329,87 +1046,86 @@ async def _async_scanner(
         await asyncio.sleep(config.SCAN_INTERVAL_SEC)
 
 
-async def _async_exit_checker(risk, exit_mgr, ws_monitor, sector_rotation, pairs_trading):
-    """Async task: check exit conditions every 30 seconds."""
+async def _async_exit_checker(
+    risk, stat_mr, kalman_pairs, micro_mom, beta_neutral,
+    vol_engine, pnl_lock, ws_monitor,
+):
+    """Async task: check V6 exit conditions every 30 seconds."""
     while True:
         try:
             current = now_et()
             ct = current.time()
 
             if is_trading_hours(ct):
-                # Advanced exits
-                if exit_mgr:
-                    try:
-                        exit_actions = exit_mgr.check_exits(risk, current)
-                        for action in exit_actions:
-                            if ws_monitor and action["symbol"] not in risk.open_trades:
-                                ws_monitor.unsubscribe(action["symbol"])
-                    except Exception as e:
-                        logger.error(f"[async] Exit check failed: {e}")
+                # Strategy exits
+                try:
+                    mr_exits = stat_mr.check_exits(risk.open_trades, current)
+                    if mr_exits:
+                        _handle_strategy_exits(mr_exits, risk, current, ws_monitor)
+                except Exception as e:
+                    logger.error(f"[async] StatMR exit check failed: {e}")
 
-                # VWAP time stops
-                expired = check_vwap_time_stops(risk.open_trades, current)
-                for symbol in expired:
-                    if symbol in risk.open_trades:
-                        risk.close_trade(symbol, risk.open_trades[symbol].entry_price, current, exit_reason="time_stop")
-                        if ws_monitor:
-                            ws_monitor.unsubscribe(symbol)
+                try:
+                    pair_exits = kalman_pairs.check_exits(risk.open_trades, current)
+                    if pair_exits:
+                        _handle_strategy_exits(pair_exits, risk, current, ws_monitor)
+                except Exception as e:
+                    logger.error(f"[async] KalmanPairs exit check failed: {e}")
 
-                # Momentum max hold
-                for symbol in check_momentum_max_hold(risk.open_trades, current):
-                    if symbol in risk.open_trades:
-                        risk.close_trade(symbol, risk.open_trades[symbol].entry_price, current, exit_reason="max_hold")
-                        if ws_monitor:
-                            ws_monitor.unsubscribe(symbol)
+                try:
+                    micro_exits = micro_mom.check_exits(risk.open_trades, current)
+                    if micro_exits:
+                        _handle_strategy_exits(micro_exits, risk, current, ws_monitor)
+                except Exception as e:
+                    logger.error(f"[async] MicroMom exit check failed: {e}")
 
-                # Gap & Go time stop
-                if ct >= config.GAP_EXIT_TIME:
-                    for symbol in close_gap_go_positions(risk.open_trades, current):
-                        if symbol in risk.open_trades:
-                            risk.close_trade(symbol, risk.open_trades[symbol].entry_price, current, exit_reason="gap_time_stop")
-                            if ws_monitor:
-                                ws_monitor.unsubscribe(symbol)
+                # Beta neutralization
+                if beta_neutral.should_check_now(current):
+                    if not beta_neutral.should_skip(current):
+                        try:
+                            prices = _get_current_prices(risk.open_trades)
+                            beta_neutral.compute_portfolio_beta(risk.open_trades, prices)
+                            if beta_neutral.needs_hedge():
+                                spy_price = prices.get("SPY")
+                                if not spy_price:
+                                    try:
+                                        snap = get_snapshot("SPY")
+                                        spy_price = float(snap.latest_trade.price) if snap and snap.latest_trade else None
+                                    except Exception:
+                                        spy_price = None
+                                if spy_price:
+                                    hedge_signal = beta_neutral.compute_hedge_signal(
+                                        risk.current_equity, spy_price
+                                    )
+                                    if hedge_signal:
+                                        regime = "UNKNOWN"  # Hedge is regime-agnostic
+                                        process_signals(
+                                            [hedge_signal], risk, regime, current,
+                                            vol_engine, pnl_lock, ws_monitor,
+                                        )
+                        except Exception as e:
+                            logger.error(f"[async] Beta neutralization failed: {e}")
 
-                # Sector max hold
-                if sector_rotation and config.SECTOR_ROTATION_ENABLED:
-                    for symbol in check_sector_max_hold(risk.open_trades, current):
-                        if symbol in risk.open_trades:
-                            risk.close_trade(symbol, risk.open_trades[symbol].entry_price, current, exit_reason="sector_max_hold")
-                            if ws_monitor:
-                                ws_monitor.unsubscribe(symbol)
-                            if symbol in sector_rotation.held_sectors:
-                                del sector_rotation.held_sectors[symbol]
-
-                # Pairs max hold + z-score exits
-                if pairs_trading and config.PAIRS_TRADING_ENABLED:
-                    for symbol in check_pairs_max_hold(risk.open_trades, current):
-                        if symbol in risk.open_trades:
-                            risk.close_trade(symbol, risk.open_trades[symbol].entry_price, current, exit_reason="pairs_max_hold")
-                            if ws_monitor:
-                                ws_monitor.unsubscribe(symbol)
-                    try:
-                        for symbol in pairs_trading.check_pair_exits(risk.open_trades, current):
-                            if symbol in risk.open_trades:
-                                from data import get_snapshot
+                # EOD close for day-hold positions
+                if ct >= config.ORB_EXIT_TIME:
+                    for symbol in list(risk.open_trades.keys()):
+                        trade = risk.open_trades[symbol]
+                        if trade.hold_type == "day" and trade.strategy in ("MICRO_MOM", "BETA_HEDGE"):
+                            try:
+                                close_position(symbol, reason="eod_close")
                                 try:
                                     snap = get_snapshot(symbol)
-                                    exit_price = float(snap.latest_trade.price) if snap and snap.latest_trade else risk.open_trades[symbol].entry_price
+                                    ep = float(snap.latest_trade.price) if snap and snap.latest_trade else trade.entry_price
                                 except Exception:
-                                    exit_price = risk.open_trades[symbol].entry_price
-                                close_position(symbol, reason="pairs_zscore_exit")
-                                risk.close_trade(symbol, exit_price, current, exit_reason="pairs_zscore_exit")
+                                    ep = trade.entry_price
+                                risk.close_trade(symbol, ep, current, exit_reason="eod_close")
                                 if ws_monitor:
                                     ws_monitor.unsubscribe(symbol)
-                    except Exception as e:
-                        logger.error(f"[async] Pairs z-score exit failed: {e}")
+                            except Exception as e:
+                                logger.error(f"[async] EOD close failed for {symbol}: {e}")
 
-                # ORB EOD close
-                if ct >= config.ORB_EXIT_TIME:
-                    for symbol in close_orb_positions(risk.open_trades, current):
-                        if symbol in risk.open_trades:
-                            risk.close_trade(symbol, risk.open_trades[symbol].entry_price, current, exit_reason="eod_close")
-                            if ws_monitor:
-                                ws_monitor.unsubscribe(symbol)
+                # Shadow exits
+                check_shadow_exits(current)
 
         except Exception as e:
             logger.error(f"[async] Exit checker error: {e}", exc_info=True)
@@ -1455,17 +1171,15 @@ async def _async_state_saver(risk):
 
 
 async def _async_daily_tasks(
-    risk, regime_detector, orb, vwap, momentum, gap_go,
-    sector_rotation, pairs_trading, rs_tracker,
+    risk, regime_detector, stat_mr, kalman_pairs, micro_mom,
+    pnl_lock, beta_neutral, vol_engine,
 ):
-    """Async task: handle daily resets, VIX alerts, regime updates, analytics."""
+    """Async task: handle daily resets, regime updates, analytics, consistency score."""
     last_day = now_et().date()
-    allocation_updated_today = False
-    news_cache_cleared_today = False
     last_sunday_task = None
-    last_vix_alert_level = None
     eod_summary_printed = False
     current_analytics = None
+    latest_consistency_score = 0.0
 
     while True:
         try:
@@ -1474,20 +1188,11 @@ async def _async_daily_tasks(
 
             # Daily reset
             if current.date() != last_day:
-                logger.info("[async] New trading day — resetting state")
-                orb.reset_daily()
-                vwap.reset_daily()
-                momentum.reset_daily()
-                if gap_go:
-                    gap_go.reset_daily()
-                if sector_rotation:
-                    sector_rotation.reset_daily()
-                allocation_updated_today = False
-                news_cache_cleared_today = False
-                eod_summary_printed = False
-
-                if rs_tracker:
-                    rs_tracker.clear_cache()
+                logger.info("[async] New trading day -- resetting state")
+                stat_mr.reset_daily()
+                micro_mom.reset_daily()
+                pnl_lock.reset_daily()
+                beta_neutral.reset_daily()
 
                 try:
                     account = get_account()
@@ -1495,6 +1200,7 @@ async def _async_daily_tasks(
                 except Exception as e:
                     logger.error(f"[async] Daily reset failed: {e}")
                 last_day = current.date()
+                eod_summary_printed = False
 
                 try:
                     load_earnings_cache(config.SYMBOLS)
@@ -1502,77 +1208,32 @@ async def _async_daily_tasks(
                 except Exception as e:
                     logger.error(f"[async] Cache refresh failed: {e}")
 
-            # News cache clear
-            if (not news_cache_cleared_today and news_filter
-                    and ct >= config.NEWS_CACHE_CLEAR_TIME):
-                news_filter.clear_cache()
-                news_cache_cleared_today = True
-
             # Sunday tasks
             if (current.weekday() == 6 and ct >= time(0, 0)
                     and last_sunday_task != current.date()):
                 last_sunday_task = current.date()
-                if config.USE_ML_FILTER and ml_filter:
-                    try:
-                        ml_filter.retrain_all()
-                    except Exception as e:
-                        logger.error(f"[async] ML retrain failed: {e}")
-                if config.AUTO_OPTIMIZE:
-                    try:
-                        from optimizer import weekly_optimization
-                        weekly_optimization()
-                    except Exception as e:
-                        logger.error(f"[async] Optimization failed: {e}")
-                if pairs_trading and config.PAIRS_TRADING_ENABLED:
-                    try:
-                        pairs_trading.discover_pairs(config.STANDARD_SYMBOLS, current)
-                        pairs_trading.revalidate_pairs()
-                    except Exception as e:
-                        logger.error(f"[async] Pairs discovery failed: {e}")
+                try:
+                    kalman_pairs.select_pairs_weekly(current)
+                except Exception as e:
+                    logger.error(f"[async] Weekly pair selection failed: {e}")
 
             # Regime update
             regime_detector.update(current)
 
-            # RS tracker
-            if rs_tracker and is_market_hours(ct):
-                try:
-                    rs_tracker.update(current)
-                except Exception as e:
-                    logger.warning(f"[async] RS update failed: {e}")
-
-            # Capital allocation
-            if (config.DYNAMIC_ALLOCATION and not allocation_updated_today
-                    and ct >= config.ALLOCATION_RECALC_TIME):
-                try:
-                    risk.update_strategy_weights()
-                    allocation_updated_today = True
-                except Exception as e:
-                    logger.error(f"[async] Allocation update failed: {e}")
-
-            # VIX alerts
-            if config.VIX_RISK_SCALING_ENABLED and notifications and config.WHATSAPP_ENABLED:
-                try:
-                    from risk import get_vix_level as _gvl
-                    vix = _gvl()
-                    alert_level = None
-                    if vix >= 40:
-                        alert_level = "extreme"
-                    elif vix >= 30:
-                        alert_level = "high"
-                    elif vix >= 25:
-                        alert_level = "elevated"
-                    if alert_level and alert_level != last_vix_alert_level:
-                        notifications.notify_vix_alert(vix, get_vix_risk_scalar())
-                        last_vix_alert_level = alert_level
-                    elif vix < 25:
-                        last_vix_alert_level = None
-                except Exception:
-                    pass
+            # Vol scalar update
+            try:
+                from risk import get_vix_level
+                vix = get_vix_level()
+                pnl_series = database.get_daily_pnl_series(days=20)
+                rolling_std = float(np.std(pnl_series)) if np is not None and len(pnl_series) > 2 else 0.01
+                vol_engine.compute_vol_scalar(vix=vix, rolling_pnl_std=rolling_std)
+            except Exception:
+                pass
 
             # EOD summary
             if ct >= config.EOD_SUMMARY_TIME and not eod_summary_printed:
                 summary = risk.get_day_summary()
-                print_day_summary(summary)
+                print_day_summary(summary, consistency_score=latest_consistency_score)
                 logger.info(f"Day summary: {summary}")
                 if notifications and config.WHATSAPP_ENABLED:
                     try:
@@ -1593,6 +1254,26 @@ async def _async_daily_tasks(
                     )
                 except Exception as e:
                     logger.error(f"[async] Daily snapshot failed: {e}")
+
+                # Consistency score
+                try:
+                    daily_pnls = database.get_daily_pnl_series(days=30)
+                    sharpe = current_analytics.get("sharpe_7d", 0) if current_analytics else 0
+                    max_dd = current_analytics.get("max_drawdown", 0) if current_analytics else 0
+                    latest_consistency_score = compute_consistency_score(daily_pnls, sharpe, max_dd)
+                    pct_positive = sum(1 for p in daily_pnls if p > 0) / max(len(daily_pnls), 1)
+                    database.save_consistency_log(
+                        date=current.strftime("%Y-%m-%d"),
+                        consistency_score=latest_consistency_score,
+                        pct_positive=pct_positive,
+                        sharpe=sharpe,
+                        max_drawdown=max_dd,
+                        vol_scalar_avg=vol_engine.last_scalar,
+                        beta_avg=beta_neutral.portfolio_beta,
+                    )
+                except Exception as e:
+                    logger.error(f"[async] Consistency score failed: {e}")
+
                 eod_summary_printed = True
 
             # Analytics
@@ -1614,16 +1295,23 @@ async def _async_daily_tasks(
         await asyncio.sleep(60)
 
 
-async def _async_dashboard_updater(risk, regime_detector, start_time, live):
+async def _async_dashboard_updater(
+    risk, regime_detector, start_time, live,
+    pnl_lock, vol_engine, beta_neutral,
+):
     """Async task: refresh the Rich dashboard."""
+    latest_consistency_score = 0.0
     while True:
         try:
             current = now_et()
             live.update(
                 build_dashboard(
                     risk, regime_detector.regime, start_time, current, current,
-                    len(config.SYMBOLS), None, get_excluded_count(),
-                    risk.get_strategy_weights(),
+                    len(config.SYMBOLS), None,
+                    pnl_lock_state=pnl_lock.state.value,
+                    vol_scalar=vol_engine.last_scalar,
+                    portfolio_beta=beta_neutral.portfolio_beta,
+                    consistency_score=latest_consistency_score,
                 )
             )
         except Exception as e:
@@ -1632,11 +1320,11 @@ async def _async_dashboard_updater(risk, regime_detector, start_time, live):
 
 
 async def async_main():
-    """Async entry point — runs all tasks concurrently under supervision."""
+    """Async entry point -- runs all tasks concurrently under supervision."""
     import asyncio as _asyncio
     from supervisor import TaskSupervisor
 
-    console.print("[bold cyan]Starting Algo Trading Bot V5 (ASYNC MODE)...[/bold cyan]\n")
+    console.print("[bold cyan]Starting Velox V6 Trading Bot (ASYNC MODE)...[/bold cyan]\n")
 
     # Initialize database
     database.init_db()
@@ -1645,44 +1333,22 @@ async def async_main():
     # Startup checks
     info = startup_checks()
 
-    # Initialize strategies (same as sync)
+    # V6 strategy initialization
+    stat_mr = StatMeanReversion()
+    kalman_pairs = KalmanPairsTrader()
+    micro_mom = IntradayMicroMomentum()
+
+    # V6 risk engine
+    vol_engine = VolatilityTargetingRiskEngine()
+    pnl_lock = DailyPnLLock()
+    beta_neutral = BetaNeutralizer()
+
     regime_detector = MarketRegime()
-    orb = ORBStrategy()
-    vwap = VWAPStrategy()
-    momentum = MomentumStrategy()
-    gap_go = GapGoStrategy() if config.GAP_GO_ENABLED else None
     risk = RiskManager()
-
-    sector_rotation = None
-    if config.SECTOR_ROTATION_ENABLED and SectorRotationStrategy:
-        sector_rotation = SectorRotationStrategy()
-    pairs_trading = None
-    if config.PAIRS_TRADING_ENABLED and PairsTradingStrategy:
-        pairs_trading = PairsTradingStrategy()
-    exit_mgr = None
-    if config.ADVANCED_EXITS_ENABLED and ExitManager:
-        exit_mgr = ExitManager()
-
     risk.reset_daily(info["equity"], info["cash"])
     risk.load_from_db()
 
-    rs_tracker = None
-    if config.USE_RS_FILTER and RelativeStrengthTracker:
-        rs_tracker = RelativeStrengthTracker()
-
-    if config.USE_ML_FILTER and ml_filter:
-        try:
-            ml_filter.load_models()
-        except Exception:
-            pass
-
-    if config.DYNAMIC_ALLOCATION:
-        try:
-            risk.update_strategy_weights()
-        except Exception:
-            pass
-
-    # WS monitor (still threaded — it uses its own asyncio loop)
+    # WS monitor
     ws_monitor = None
     if config.WEBSOCKET_MONITORING and PositionMonitor:
         ws_monitor = PositionMonitor(risk)
@@ -1701,6 +1367,10 @@ async def async_main():
         except Exception:
             pass
 
+    # Notifications
+    if notifications and config.WHATSAPP_ENABLED:
+        console.print("[green]Notifications enabled.[/green]")
+
     # Load filters
     try:
         load_earnings_cache(config.SYMBOLS)
@@ -1714,11 +1384,10 @@ async def async_main():
     start_time = now_et()
     logging.getLogger().removeHandler(_stream_handler)
 
-    console.print(f"\n[bold green]Bot V4 (ASYNC) is running. Press Ctrl+C to stop.[/bold green]\n")
+    console.print(f"\n[bold green]Velox V6 (ASYNC) is running. Press Ctrl+C to stop.[/bold green]\n")
 
     supervisor = TaskSupervisor()
 
-    # Optional crash notification via Telegram
     if notifications and config.WHATSAPP_ENABLED:
         async def _crash_notify(name, exc, count):
             try:
@@ -1729,20 +1398,24 @@ async def async_main():
 
     try:
         with Live(
-            build_dashboard(risk, regime_detector.regime, start_time, now_et(), None,
-                            len(config.SYMBOLS), None, get_excluded_count(),
-                            risk.get_strategy_weights()),
+            build_dashboard(
+                risk, regime_detector.regime, start_time, now_et(), None,
+                len(config.SYMBOLS), None,
+                pnl_lock_state=pnl_lock.state.value,
+                vol_scalar=vol_engine.last_scalar,
+                portfolio_beta=beta_neutral.portfolio_beta,
+            ),
             console=console, refresh_per_second=0.2, transient=False,
         ) as live:
-            # Launch all supervised tasks
             await supervisor.launch(
                 "scanner", _async_scanner,
-                risk, regime_detector, orb, vwap, momentum, gap_go,
-                sector_rotation, pairs_trading, rs_tracker, ws_monitor,
+                risk, regime_detector, stat_mr, kalman_pairs, micro_mom,
+                vol_engine, pnl_lock, beta_neutral, ws_monitor,
             )
             await supervisor.launch(
                 "exit_checker", _async_exit_checker,
-                risk, exit_mgr, ws_monitor, sector_rotation, pairs_trading,
+                risk, stat_mr, kalman_pairs, micro_mom, beta_neutral,
+                vol_engine, pnl_lock, ws_monitor,
             )
             await supervisor.launch(
                 "broker_sync", _async_broker_sync,
@@ -1754,15 +1427,15 @@ async def async_main():
             )
             await supervisor.launch(
                 "daily_tasks", _async_daily_tasks,
-                risk, regime_detector, orb, vwap, momentum, gap_go,
-                sector_rotation, pairs_trading, rs_tracker,
+                risk, regime_detector, stat_mr, kalman_pairs, micro_mom,
+                pnl_lock, beta_neutral, vol_engine,
             )
             await supervisor.launch(
                 "dashboard", _async_dashboard_updater,
                 risk, regime_detector, start_time, live,
+                pnl_lock, vol_engine, beta_neutral,
             )
 
-            # Run forever until cancelled
             try:
                 await _asyncio.Event().wait()
             except _asyncio.CancelledError:
@@ -1781,23 +1454,23 @@ async def async_main():
         console.print("[green]State saved. Bot stopped.[/green]")
 
 
+# ===========================================================================
+# DIAGNOSTIC MODE
+# ===========================================================================
+
 def run_diagnostic():
     """Run one diagnostic scan cycle and print what's blocking trades."""
-    print("\n=== V5 SIGNAL DIAGNOSTIC MODE ===\n")
-    print("Initializing strategies and filters...\n")
+    print("\n=== VELOX V6 SIGNAL DIAGNOSTIC MODE ===\n")
+    print("Initializing V6 strategies and filters...\n")
 
-    # Initialize same as main startup
-    from strategies import ORBStrategy, VWAPStrategy
-    from strategies.mtf_confirmation import mtf_confirmer
-    from news_filter import news_filter
     from earnings import has_earnings_soon, load_earnings_cache
     from correlation import is_too_correlated, load_correlation_cache
-
-    orb = ORBStrategy()
-    vwap = VWAPStrategy()
-
-    # Get current time and account
     from data import get_clock, get_account
+
+    stat_mr = StatMeanReversion()
+    kalman_pairs = KalmanPairsTrader()
+    micro_mom = IntradayMicroMomentum()
+
     clock = get_clock()
     now = clock.timestamp
 
@@ -1824,104 +1497,75 @@ def run_diagnostic():
     # Track rejections
     rejection_counts: dict[str, int] = {}
     signals_generated: list[str] = []
-    symbol_details: list[tuple[str, str, str]] = []  # (symbol, strategy, reason)
 
     def count(reason: str):
         rejection_counts[reason] = rejection_counts.get(reason, 0) + 1
 
-    # --- ORB Diagnostic ---
-    orb_signals = []
-    vwap_signals = []
+    mr_signals = []
+    pair_signals = []
+    micro_signals = []
 
     if clock.is_open:
-        print("Recording ORB ranges...")
-        orb.record_opening_ranges(config.STANDARD_SYMBOLS, now)
-        print(f"  ORB ranges recorded: {len(orb.ranges)}")
-        print(f"  Top volume symbols: {len(orb.top_volume_symbols)}")
+        # Prepare MR universe
+        print("Preparing MR universe...")
+        stat_mr.prepare_universe(config.STANDARD_SYMBOLS, now)
+        print(f"  MR universe: {len(stat_mr.universe)} symbols")
 
-        for symbol in config.STANDARD_SYMBOLS:
-            if symbol not in orb.ranges:
-                count("orb_no_range_data")
-                continue
-            if symbol not in orb.top_volume_symbols:
-                count("orb_not_in_top_volume")
-                continue
+        # Scan strategies
+        try:
+            mr_signals = stat_mr.scan(now, regime)
+            for sig in mr_signals:
+                signals_generated.append(f"{sig.symbol} STAT_MR {sig.side} @ ${sig.entry_price:.2f}")
+        except Exception as e:
+            print(f"  StatMR scan error: {e}")
 
-            orb_data = orb.ranges[symbol]
-            gap_pct = abs(orb_data.low - orb_data.prev_close) / orb_data.prev_close
-            if gap_pct > config.MAX_GAP_PCT:
-                count("orb_gap_too_large")
-                symbol_details.append((symbol, "ORB", f"gap={gap_pct:.1%} > {config.MAX_GAP_PCT:.1%}"))
-                continue
+        try:
+            pair_signals = kalman_pairs.scan(now, regime)
+            for sig in pair_signals:
+                signals_generated.append(f"{sig.symbol} KALMAN_PAIRS {sig.side} @ ${sig.entry_price:.2f}")
+        except Exception as e:
+            print(f"  KalmanPairs scan error: {e}")
 
-            orb_range = orb_data.high - orb_data.low
-            range_pct = orb_range / ((orb_data.high + orb_data.low) / 2)
-            if range_pct > config.MAX_ORB_RANGE_PCT:
-                count("orb_range_too_wide")
-                symbol_details.append((symbol, "ORB", f"range={range_pct:.1%} > {config.MAX_ORB_RANGE_PCT:.1%}"))
-                continue
+        try:
+            micro_mom.detect_event(now)
+            micro_signals = micro_mom.scan(now, day_pnl_pct=0.0, regime=regime)
+            for sig in micro_signals:
+                signals_generated.append(f"{sig.symbol} MICRO_MOM {sig.side} @ ${sig.entry_price:.2f}")
+        except Exception as e:
+            print(f"  MicroMom scan error: {e}")
 
-            count("orb_no_breakout")
-
-        # Run actual ORB scan
-        orb_signals = orb.scan(config.STANDARD_SYMBOLS, now, regime)
-        for sig in orb_signals:
-            signals_generated.append(f"{sig.symbol} ORB {sig.side} @ ${sig.entry_price:.2f}")
-
-    # --- VWAP Diagnostic ---
-    if clock.is_open:
-        vwap_signals = vwap.scan(config.SYMBOLS, now, regime)
-        for sig in vwap_signals:
-            signals_generated.append(f"{sig.symbol} VWAP {sig.side} @ ${sig.entry_price:.2f}")
-
-    # --- Filter diagnostic on signals ---
-    all_signals = (orb_signals if clock.is_open else []) + (vwap_signals if clock.is_open else [])
+    # Filter diagnostic
+    all_signals = mr_signals + pair_signals + micro_signals
     blocked_signals = []
     passed_signals = []
 
     for sig in all_signals:
-        # Earnings check
         try:
             if has_earnings_soon(sig.symbol):
                 count("filter_earnings")
                 blocked_signals.append(f"{sig.symbol} {sig.strategy}: BLOCKED by earnings")
                 continue
-        except:
+        except Exception:
             pass
 
-        # Correlation check
-        try:
-            if is_too_correlated(sig.symbol, [], config.CORRELATION_THRESHOLD):
-                count("filter_correlation")
-                blocked_signals.append(f"{sig.symbol} {sig.strategy}: BLOCKED by correlation")
-                continue
-        except:
-            pass
-
-        # MTF check
-        if config.MTF_ENABLED_FOR.get(sig.strategy, True):
-            confirmed = mtf_confirmer.confirm(
-                {"symbol": sig.symbol, "strategy": sig.strategy, "side": sig.side}, now
-            )
-            if not confirmed:
-                count("filter_mtf")
-                blocked_signals.append(f"{sig.symbol} {sig.strategy}: BLOCKED by MTF confirmation")
-                continue
-
-        # News check
-        blocked, reason = news_filter.should_block(sig.symbol, sig.side)
-        if blocked:
-            count("filter_news")
-            blocked_signals.append(f"{sig.symbol} {sig.strategy}: BLOCKED by news ({reason})")
-            continue
+        if sig.strategy != "KALMAN_PAIRS":
+            try:
+                if is_too_correlated(sig.symbol, []):
+                    count("filter_correlation")
+                    blocked_signals.append(f"{sig.symbol} {sig.strategy}: BLOCKED by correlation")
+                    continue
+            except Exception:
+                pass
 
         passed_signals.append(f"{sig.symbol} {sig.strategy} {sig.side} @ ${sig.entry_price:.2f}")
 
-    # --- Print Results ---
+    # Print results
     print("\n" + "=" * 60)
     print("DIAGNOSTIC SCAN RESULTS")
     print("=" * 60)
     print(f"\n  Total symbols scanned:    {len(config.SYMBOLS)}")
+    print(f"  MR universe size:         {len(stat_mr.universe)}")
+    print(f"  Active pairs:             {len(kalman_pairs.active_pairs)}")
     print(f"  Signals generated:        {len(all_signals)}")
     print(f"  Signals blocked:          {len(blocked_signals)}")
     print(f"  Signals passed:           {len(passed_signals)}")
@@ -1943,17 +1587,17 @@ def run_diagnostic():
     else:
         print(f"\n  NO SIGNALS PASSED -- all blocked or no setups found")
 
-    if symbol_details[:10]:
-        print(f"\n  SAMPLE REJECTIONS:")
-        for sym, strat, reason in symbol_details[:10]:
-            print(f"    {sym:<6} {strat:<8} {reason}")
-
     print()
 
 
+# ===========================================================================
+# Entry point
+# ===========================================================================
+
 if __name__ == "__main__":
     import argparse as _argparse
-    _parser = _argparse.ArgumentParser(description="Algo Trading Bot V5")
+
+    _parser = _argparse.ArgumentParser(description="Velox V6 Trading Bot")
     _parser.add_argument("--diagnose", action="store_true", help="Run one diagnostic scan cycle (read-only)")
     _args = _parser.parse_args()
 

@@ -1,4 +1,4 @@
-"""V4: FastAPI web dashboard — portfolio history, trade log, signal analysis, health check."""
+"""V6: FastAPI web dashboard — portfolio history, trade log, signal analysis, risk state, consistency."""
 
 import logging
 import time as _time
@@ -12,7 +12,7 @@ import database
 
 logger = logging.getLogger(__name__)
 
-app = FastAPI(title="Trading Bot V4 Dashboard", docs_url=None, redoc_url=None)
+app = FastAPI(title="Velox V6 Dashboard", docs_url=None, redoc_url=None)
 
 _start_time = _time.time()
 
@@ -27,20 +27,12 @@ async def health():
     except Exception:
         open_count = -1
 
-    vix_level = None
-    if config.VIX_RISK_SCALING_ENABLED:
-        try:
-            from risk import get_vix_level
-            vix_level = get_vix_level()
-        except Exception:
-            pass
-
     return {
         "status": "ok",
         "uptime_seconds": round(uptime_sec),
         "open_positions": open_count,
-        "vix": vix_level,
         "paper_mode": config.PAPER_MODE,
+        "version": "V6",
     }
 
 
@@ -102,6 +94,45 @@ async def shadow_trades(days: int = Query(14, ge=1, le=90)):
         return {"open": [], "performance": [], "error": str(e)}
 
 
+@app.get("/api/consistency")
+async def consistency(days: int = Query(30, ge=1, le=90)):
+    """V6: Return consistency score history."""
+    try:
+        return database.get_consistency_log(days=days)
+    except Exception as e:
+        return {"error": str(e)}
+
+
+@app.get("/api/risk-state")
+async def risk_state():
+    """V6: Return current risk engine state (vol scalar, PnL lock, beta)."""
+    # This will be populated by main.py setting shared state
+    return _v6_risk_state.copy()
+
+
+# V6: Shared risk state updated by main loop
+_v6_risk_state = {
+    "pnl_lock_state": "NORMAL",
+    "vol_scalar": 1.0,
+    "portfolio_beta": 0.0,
+    "consistency_score": 0.0,
+    "day_pnl_pct": 0.0,
+}
+
+
+def update_risk_state(pnl_lock_state: str = "NORMAL", vol_scalar: float = 1.0,
+                      portfolio_beta: float = 0.0, consistency_score: float = 0.0,
+                      day_pnl_pct: float = 0.0):
+    """Called by main loop to update risk state for the API."""
+    _v6_risk_state.update({
+        "pnl_lock_state": pnl_lock_state,
+        "vol_scalar": vol_scalar,
+        "portfolio_beta": portfolio_beta,
+        "consistency_score": consistency_score,
+        "day_pnl_pct": day_pnl_pct,
+    })
+
+
 @app.get("/api/trade_analysis")
 async def trade_analysis(days: int = Query(7, ge=1, le=90)):
     """Return exit reason breakdown and filter block summary."""
@@ -147,7 +178,7 @@ tr:hover{background:#161b22}
 </style>
 </head>
 <body>
-<h1>ALGO TRADING BOT V3</h1>
+<h1>VELOX V6 — Autonomous Algorithmic Trading System</h1>
 
 <div class="grid" id="stats-grid"></div>
 
@@ -160,11 +191,10 @@ tr:hover{background:#161b22}
 <div class="filters">
 <select id="stratFilter" onchange="loadTrades()">
 <option value="">All Strategies</option>
-<option value="ORB">ORB</option>
-<option value="VWAP">VWAP</option>
-<option value="MOMENTUM">Momentum</option>
-<option value="GAP_GO">Gap & Go</option>
-<option value="EMA_SCALP">EMA Scalp</option>
+<option value="STAT_MR">Mean Reversion</option>
+<option value="KALMAN_PAIRS">Pairs Trading</option>
+<option value="MICRO_MOM">Micro Momentum</option>
+<option value="BETA_HEDGE">Beta Hedge</option>
 </select>
 </div>
 <table>
@@ -188,7 +218,7 @@ tr:hover{background:#161b22}
 <div id="signal-stats"></div>
 </div>
 
-<div class="footer">Auto-refreshes every 30s | Trading Bot V5</div>
+<div class="footer">Auto-refreshes every 30s | Velox V6</div>
 
 <script>
 let chart=null;

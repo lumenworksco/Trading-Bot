@@ -1,0 +1,356 @@
+"""Statistical Mean Reversion strategy — 60% of capital allocation.
+
+Identifies stocks whose intraday prices have temporarily deviated from
+their mean and are likely to revert. Uses Ornstein-Uhlenbeck process
+modeling, Hurst exponent filtering, and ADF stationarity testing.
+
+Target: 0.3-0.8% per trade, 65-75% win rate.
+"""
+
+import logging
+from datetime import datetime, time, timedelta
+
+import numpy as np
+import pandas as pd
+from alpaca.data.timeframe import TimeFrame
+
+import config
+from data import get_intraday_bars, get_daily_bars
+from strategies.base import Signal
+from analytics.ou_tools import fit_ou_params, compute_zscore
+from analytics.hurst import hurst_exponent
+
+logger = logging.getLogger(__name__)
+
+
+class StatMeanReversion:
+    """Trade mean-reverting stocks using OU z-score signals.
+
+    Workflow:
+    1. prepare_universe() at 9:00 AM — filter stocks by Hurst < 0.52 + ADF p < 0.05 + OU half-life 1-48h
+    2. scan() every 2 min — compute z-scores on 2-min bars, enter at |z| > 1.5
+    3. check_exits() every cycle — z-score exit at +/-0.2 (full), +/-0.5 (partial), +/-2.5 (stop)
+    """
+
+    def __init__(self):
+        self.universe: list[str] = []          # Today's filtered universe
+        self.ou_params: dict[str, dict] = {}   # symbol -> {kappa, mu, sigma, half_life}
+        self._universe_ready = False
+        self._last_scan = None
+
+    def reset_daily(self):
+        """Clear all state for a new trading day."""
+        self.universe = []
+        self.ou_params = {}
+        self._universe_ready = False
+        self._last_scan = None
+
+    def prepare_universe(self, symbols: list[str], now: datetime) -> list[str]:
+        """Filter symbols for mean-reverting characteristics.
+
+        Called once at MR_UNIVERSE_PREP_TIME (9:00 AM).
+        Uses 20 days of daily close data for filtering.
+
+        Steps:
+        1. Get 20 days of daily bars for each symbol
+        2. Compute Hurst exponent — must be < MR_HURST_MAX (0.52)
+        3. Run ADF test — p-value must be < MR_ADF_PVALUE_MAX (0.05)
+           (approximated via OU regression; negative b coefficient implies stationarity)
+        4. Fit OU params — half-life must be between MR_HALFLIFE_MIN_HOURS (1) and MR_HALFLIFE_MAX_HOURS (48)
+        5. Rank by quality (low Hurst + high kappa) and take top MR_UNIVERSE_SIZE (40)
+        """
+        candidates = []
+
+        for symbol in symbols:
+            try:
+                # Get recent daily bars
+                bars = get_daily_bars(symbol, days=30)
+                if bars is None or bars.empty or len(bars) < 20:
+                    continue
+
+                close = bars["close"]
+
+                # 1. Hurst exponent — must indicate mean reversion (< 0.5 ideal)
+                hurst = hurst_exponent(close)
+                if hurst >= config.MR_HURST_MAX:
+                    continue
+
+                # 2. Fit OU parameters (also serves as ADF-like stationarity check:
+                #    fit_ou_params returns {} if b >= 0, i.e. not mean-reverting)
+                ou = fit_ou_params(close)
+                if not ou:
+                    continue
+
+                # 3. Half-life check (OU half_life is in bar units; daily bars -> days)
+                half_life_hours = ou['half_life'] * 24  # days -> hours
+                if not (config.MR_HALFLIFE_MIN_HOURS <= half_life_hours <= config.MR_HALFLIFE_MAX_HOURS):
+                    continue
+
+                candidates.append({
+                    'symbol': symbol,
+                    'hurst': hurst,
+                    'ou': ou,
+                    'half_life_hours': half_life_hours,
+                    'quality': (1 - hurst) + ou['kappa'],  # Higher = more mean-reverting
+                })
+
+            except Exception as e:
+                logger.debug(f"MR universe filter error for {symbol}: {e}")
+                continue
+
+        # Rank by quality, take top N
+        candidates.sort(key=lambda c: c['quality'], reverse=True)
+        top = candidates[:config.MR_UNIVERSE_SIZE]
+
+        self.universe = [c['symbol'] for c in top]
+        self.ou_params = {c['symbol']: c['ou'] for c in top}
+        self._universe_ready = True
+
+        logger.info(f"MR universe prepared: {len(self.universe)} symbols from {len(symbols)} candidates")
+        return self.universe
+
+    def scan(self, now: datetime, regime: str = "UNKNOWN") -> list[Signal]:
+        """Scan universe for mean reversion entry signals.
+
+        Called every MR_SCAN_INTERVAL_SEC (120s).
+        Uses 2-min intraday bars to compute real-time z-scores.
+
+        Entry conditions:
+        - |z-score| > MR_ZSCORE_ENTRY (1.5)
+        - RSI(7) confirms: oversold for longs (< MR_RSI_OVERSOLD), overbought for shorts (> MR_RSI_OVERBOUGHT)
+        - Price vs VWAP: long only below VWAP, short only above VWAP
+        - Minimum expected gain > MR_MIN_GAIN_PCT (0.2%)
+        - Minimum R:R ratio > MR_MIN_RR_RATIO (1.5)
+        """
+        signals = []
+
+        if not self._universe_ready or not self.universe:
+            return signals
+
+        for symbol in self.universe:
+            try:
+                ou = self.ou_params.get(symbol)
+                if not ou:
+                    continue
+
+                # Get 2-min intraday bars (last 2 hours)
+                lookback = now - timedelta(hours=2)
+                bars = get_intraday_bars(
+                    symbol, TimeFrame(2, "Min"), start=lookback, end=now
+                )
+                if bars is None or bars.empty or len(bars) < 20:
+                    continue
+
+                close = bars["close"]
+                price = close.iloc[-1]
+
+                # Refit OU on intraday data for more accurate z-score
+                intraday_ou = fit_ou_params(close)
+                if intraday_ou:
+                    mu = intraday_ou['mu']
+                    sigma = intraday_ou['sigma']
+                else:
+                    mu = ou['mu']
+                    sigma = ou['sigma']
+
+                zscore = compute_zscore(price, mu, sigma)
+
+                # RSI(7) computation
+                rsi = self._compute_rsi(close, period=config.MR_RSI_PERIOD)
+                if rsi is None:
+                    continue
+
+                # VWAP computation
+                vwap = self._compute_vwap(bars)
+                if vwap is None:
+                    continue
+
+                # === LONG entry: price below mean ===
+                if (zscore < -config.MR_ZSCORE_ENTRY
+                        and rsi < config.MR_RSI_OVERSOLD
+                        and price < vwap
+                        and regime != "BEARISH"):
+
+                    # Target: revert to z=MR_ZSCORE_EXIT_FULL (near mean)
+                    target_price = mu + config.MR_ZSCORE_EXIT_FULL * sigma
+                    expected_gain_pct = (target_price - price) / price
+
+                    if expected_gain_pct < config.MR_MIN_GAIN_PCT:
+                        continue
+
+                    # Stop at z = MR_ZSCORE_STOP
+                    stop_price = mu - config.MR_ZSCORE_STOP * sigma
+                    stop_dist = price - stop_price
+                    gain_dist = target_price - price
+
+                    if stop_dist <= 0 or gain_dist / stop_dist < config.MR_MIN_RR_RATIO:
+                        continue
+
+                    signals.append(Signal(
+                        symbol=symbol,
+                        strategy="STAT_MR",
+                        side="buy",
+                        entry_price=round(price, 2),
+                        take_profit=round(target_price, 2),
+                        stop_loss=round(stop_price, 2),
+                        reason=f"MR long z={zscore:.2f} RSI={rsi:.0f}",
+                        hold_type="day",
+                    ))
+
+                # === SHORT entry: price above mean ===
+                elif (zscore > config.MR_ZSCORE_ENTRY
+                      and rsi > config.MR_RSI_OVERBOUGHT
+                      and price > vwap
+                      and regime != "BULLISH"
+                      and config.ALLOW_SHORT
+                      and symbol not in config.NO_SHORT_SYMBOLS):
+
+                    target_price = mu - config.MR_ZSCORE_EXIT_FULL * sigma
+                    expected_gain_pct = (price - target_price) / price
+
+                    if expected_gain_pct < config.MR_MIN_GAIN_PCT:
+                        continue
+
+                    stop_price = mu + config.MR_ZSCORE_STOP * sigma
+                    stop_dist = stop_price - price
+                    gain_dist = price - target_price
+
+                    if stop_dist <= 0 or gain_dist / stop_dist < config.MR_MIN_RR_RATIO:
+                        continue
+
+                    signals.append(Signal(
+                        symbol=symbol,
+                        strategy="STAT_MR",
+                        side="sell",
+                        entry_price=round(price, 2),
+                        take_profit=round(target_price, 2),
+                        stop_loss=round(stop_price, 2),
+                        reason=f"MR short z={zscore:.2f} RSI={rsi:.0f}",
+                        hold_type="day",
+                    ))
+
+            except Exception as e:
+                logger.debug(f"MR scan error for {symbol}: {e}")
+                continue
+
+        return signals
+
+    def check_exits(self, open_trades: dict, now: datetime) -> list[dict]:
+        """Check MR positions for z-score based exits.
+
+        Returns list of exit actions:
+            [{"symbol": ..., "action": "full"|"partial", "reason": ...}]
+
+        Exit conditions:
+        - |z| < MR_ZSCORE_EXIT_FULL (0.2): Full exit — reverted to mean
+        - |z| < MR_ZSCORE_EXIT_PARTIAL (0.5): Partial exit (50%)
+        - |z| > MR_ZSCORE_STOP (2.5): Stop — diverging further
+        - Time stop: 2x half_life without reversion
+        """
+        exits = []
+
+        for symbol, trade in open_trades.items():
+            if trade.strategy != "STAT_MR":
+                continue
+
+            try:
+                ou = self.ou_params.get(symbol)
+                if not ou:
+                    continue
+
+                # Get current price from recent bars
+                lookback = now - timedelta(minutes=10)
+                bars = get_intraday_bars(
+                    symbol, TimeFrame(2, "Min"), start=lookback, end=now
+                )
+                if bars is None or bars.empty:
+                    continue
+
+                price = bars["close"].iloc[-1]
+
+                # Compute current z-score
+                zscore = compute_zscore(price, ou['mu'], ou['sigma'])
+
+                # Time stop: 2x half_life
+                if hasattr(trade, 'entry_time') and trade.entry_time:
+                    # half_life is in bar units (daily); convert to minutes for intraday
+                    half_life_minutes = ou['half_life'] * 2 * 60  # 2x half-life in minutes
+                    max_hold = max(30, min(half_life_minutes, 240))  # 30 min to 4 hours
+                    elapsed = (now - trade.entry_time).total_seconds() / 60
+                    if elapsed > max_hold:
+                        exits.append({
+                            "symbol": symbol,
+                            "action": "full",
+                            "reason": f"MR time stop ({elapsed:.0f}min > {max_hold:.0f}min)",
+                        })
+                        continue
+
+                if trade.side == "buy":
+                    # Long: entered at negative z-score, want z to revert toward 0
+                    if -config.MR_ZSCORE_EXIT_FULL <= zscore <= config.MR_ZSCORE_EXIT_FULL:
+                        exits.append({
+                            "symbol": symbol,
+                            "action": "full",
+                            "reason": f"MR reverted z={zscore:.2f}",
+                        })
+                    elif zscore >= -config.MR_ZSCORE_EXIT_PARTIAL:
+                        exits.append({
+                            "symbol": symbol,
+                            "action": "partial",
+                            "reason": f"MR partial revert z={zscore:.2f}",
+                        })
+                    elif zscore < -config.MR_ZSCORE_STOP:
+                        exits.append({
+                            "symbol": symbol,
+                            "action": "full",
+                            "reason": f"MR stop z={zscore:.2f}",
+                        })
+
+                elif trade.side == "sell":
+                    # Short: entered at positive z-score, want z to revert toward 0
+                    if -config.MR_ZSCORE_EXIT_FULL <= zscore <= config.MR_ZSCORE_EXIT_FULL:
+                        exits.append({
+                            "symbol": symbol,
+                            "action": "full",
+                            "reason": f"MR reverted z={zscore:.2f}",
+                        })
+                    elif zscore <= config.MR_ZSCORE_EXIT_PARTIAL:
+                        exits.append({
+                            "symbol": symbol,
+                            "action": "partial",
+                            "reason": f"MR partial revert z={zscore:.2f}",
+                        })
+                    elif zscore > config.MR_ZSCORE_STOP:
+                        exits.append({
+                            "symbol": symbol,
+                            "action": "full",
+                            "reason": f"MR stop z={zscore:.2f}",
+                        })
+
+            except Exception as e:
+                logger.debug(f"MR exit check error for {symbol}: {e}")
+
+        return exits
+
+    def _compute_rsi(self, close: pd.Series, period: int = 7) -> float | None:
+        """Compute RSI over the given period."""
+        if len(close) < period + 1:
+            return None
+        delta = close.diff()
+        gain = delta.where(delta > 0, 0.0).rolling(period).mean()
+        loss = (-delta.where(delta < 0, 0.0)).rolling(period).mean()
+        if loss.iloc[-1] == 0:
+            return 100.0
+        rs = gain.iloc[-1] / loss.iloc[-1]
+        return 100.0 - (100.0 / (1.0 + rs))
+
+    def _compute_vwap(self, bars: pd.DataFrame) -> float | None:
+        """Compute VWAP from intraday bars."""
+        if bars.empty or "volume" not in bars.columns:
+            return None
+        typical = (bars["high"] + bars["low"] + bars["close"]) / 3
+        cum_vol = bars["volume"].cumsum()
+        cum_vp = (typical * bars["volume"]).cumsum()
+        if cum_vol.iloc[-1] == 0:
+            return None
+        return cum_vp.iloc[-1] / cum_vol.iloc[-1]

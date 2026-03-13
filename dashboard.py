@@ -1,4 +1,4 @@
-"""Rich terminal dashboard V5 — metrics, strategy breakdown, capital allocation, trade analysis."""
+"""Rich terminal dashboard V6 — Velox V6 strategy metrics, risk state, consistency score."""
 
 import logging
 from datetime import datetime
@@ -42,8 +42,10 @@ def build_dashboard(
     last_scan_time: datetime | None,
     num_symbols: int,
     analytics: dict | None = None,
-    earnings_excluded: int = 0,
-    strategy_weights: dict | None = None,
+    pnl_lock_state: str = "NORMAL",
+    vol_scalar: float = 1.0,
+    portfolio_beta: float = 0.0,
+    consistency_score: float = 0.0,
 ) -> Panel:
     """Build the full dashboard layout as a Rich Panel."""
 
@@ -53,32 +55,22 @@ def build_dashboard(
     regime_color = "green" if regime == "BULLISH" else "red" if regime == "BEARISH" else "yellow"
     regime_text = f"[{regime_color}]{regime}[/{regime_color}]"
 
+    # PnL Lock state display
+    if pnl_lock_state == "LOSS_HALT":
+        lock_text = "[bold red blink]LOSS HALT[/bold red blink]"
+    elif pnl_lock_state == "GAIN_LOCK":
+        lock_text = "[bold yellow]GAIN LOCK[/bold yellow]"
+    else:
+        lock_text = "[green]NORMAL[/green]"
+
     cb_text = (
         "[bold red]ACTIVE - NO NEW TRADES[/bold red]"
         if risk.circuit_breaker_active
         else "[green]INACTIVE[/green]"
     )
 
-    # V4: VIX display
-    vix_str = ""
-    if config.VIX_RISK_SCALING_ENABLED:
-        try:
-            from risk import get_vix_level, get_vix_risk_scalar
-            vix = get_vix_level()
-            scalar = get_vix_risk_scalar()
-            if vix >= 40:
-                vix_str = f" | VIX: [bold red blink]{vix:.0f} HALT[/bold red blink]"
-            elif vix >= 30:
-                vix_str = f" | VIX: [bold red]{vix:.0f}[/bold red] ({scalar:.0%})"
-            elif vix >= 25:
-                vix_str = f" | VIX: [yellow]{vix:.0f}[/yellow] ({scalar:.0%})"
-            else:
-                vix_str = f" | VIX: [green]{vix:.0f}[/green]"
-        except Exception:
-            pass
-
     # Header
-    header = f"  VELOX V5 | {mode} MODE | Regime: {regime_text}{vix_str} | Up: {uptime}"
+    header = f"  VELOX V6 | {mode} MODE | Regime: {regime_text} | PnL Lock: {lock_text} | Up: {uptime}"
 
     # Portfolio section
     day_pnl_dollars = risk.day_pnl * risk.starting_equity if risk.starting_equity else 0
@@ -94,6 +86,38 @@ def build_dashboard(
         week_pct = analytics.get("week_pnl_pct", 0)
         portfolio_lines.append(f"  Week P&L: {format_pnl(week_pnl)} {format_pnl_pct(week_pct)}")
 
+    # --- V6: Risk State panel ---
+    vol_color = "green" if 0.7 <= vol_scalar <= 1.3 else "yellow" if 0.5 <= vol_scalar <= 1.5 else "red"
+    beta_color = "green" if abs(portfolio_beta) <= 0.3 else "yellow" if abs(portfolio_beta) <= 0.5 else "red"
+    cs_color = "green" if consistency_score >= 70 else "yellow" if consistency_score >= 40 else "red"
+
+    risk_state_lines = [
+        f"  Vol Scalar:       [{vol_color}]{vol_scalar:.2f}[/{vol_color}]",
+        f"  Portfolio Beta:   [{beta_color}]{portfolio_beta:+.2f}[/{beta_color}]",
+        f"  PnL Lock:         {lock_text}",
+        f"  Consistency:      [{cs_color}]{consistency_score:.0f}/100[/{cs_color}]",
+    ]
+
+    # --- V6: Strategy Allocation panel ---
+    alloc_map = config.STRATEGY_ALLOCATIONS
+    # Count trades per strategy
+    strat_counts = {}
+    for trade in risk.open_trades.values():
+        strat_counts[trade.strategy] = strat_counts.get(trade.strategy, 0) + 1
+
+    alloc_lines = []
+    for strat_name, display_name in [("STAT_MR", "MR"), ("KALMAN_PAIRS", "PAIRS"), ("MICRO_MOM", "MICRO")]:
+        weight = alloc_map.get(strat_name, 0)
+        count = strat_counts.get(strat_name, 0)
+        bar_len = int(weight * 30)
+        bar = "#" * bar_len + "." * (30 - bar_len)
+        alloc_lines.append(f"  {display_name:<6} {bar} {weight:>3.0%}  ({count} open)")
+
+    # Add beta hedge count if any
+    hedge_count = strat_counts.get("BETA_HEDGE", 0)
+    if hedge_count > 0:
+        alloc_lines.append(f"  HEDGE                                ({hedge_count} open)")
+
     # Open positions
     open_count = len(risk.open_trades)
     pos_header = f"OPEN POSITIONS ({open_count}/{config.MAX_POSITIONS})"
@@ -107,13 +131,26 @@ def build_dashboard(
         side_tag = ""
         if trade.side == "sell":
             side_tag = " [magenta]SHORT[/magenta]"
-        strat_tag = trade.strategy
-        if trade.strategy == "GAP_GO":
-            strat_tag = "[yellow]GAP[/yellow]"
+
+        # V6: strategy-specific display
+        strat_display = trade.strategy
+        extra = ""
+        if trade.strategy == "STAT_MR":
+            strat_display = "[blue]MR[/blue]"
+            # z-score would be in trade metadata if available
+        elif trade.strategy == "KALMAN_PAIRS":
+            strat_display = "[cyan]PAIR[/cyan]"
+            if trade.pair_id:
+                extra = f" [{trade.pair_id[:8]}]"
+        elif trade.strategy == "MICRO_MOM":
+            strat_display = "[yellow]MICRO[/yellow]"
+        elif trade.strategy == "BETA_HEDGE":
+            strat_display = "[magenta]HEDGE[/magenta]"
+
         pos_lines.append(
-            f"  {symbol:<6} {strat_tag:<5} "
+            f"  {symbol:<6} {strat_display:<12} "
             f"entry=${trade.entry_price:<8.2f} "
-            f"qty={trade.qty:<4} {held_time}{hold_tag}{side_tag}"
+            f"qty={trade.qty:<4} {held_time}{hold_tag}{side_tag}{extra}"
         )
 
     if not pos_lines:
@@ -134,7 +171,7 @@ def build_dashboard(
             f"  Max Drawdown:  {md:.1%}",
         ]
 
-    # Strategy breakdown
+    # Strategy breakdown (from analytics)
     strat_lines = []
     if analytics and analytics.get("strategy_breakdown"):
         breakdown = analytics["strategy_breakdown"]
@@ -143,16 +180,8 @@ def build_dashboard(
             wr_s = data.get("win_rate", 0)
             pnl_s = data.get("pnl", 0)
             strat_lines.append(
-                f"  {strat:<10} {trades_n:>3} trades  {wr_s:>3.0%} win  {format_pnl(pnl_s)}"
+                f"  {strat:<14} {trades_n:>3} trades  {wr_s:>3.0%} win  {format_pnl(pnl_s)}"
             )
-
-    # V3: Capital allocation weights
-    alloc_lines = []
-    if strategy_weights:
-        for strat, weight in strategy_weights.items():
-            bar_len = int(weight * 30)
-            bar = "█" * bar_len + "░" * (30 - bar_len)
-            alloc_lines.append(f"  {strat:<10} {bar} {weight:.0%}")
 
     # Recent trades
     recent = risk.closed_trades[-6:] if risk.closed_trades else []
@@ -165,72 +194,58 @@ def build_dashboard(
         side_str = trade.side.upper()
         recent_lines.append(
             f"  {time_str} {side_str:<5} {trade.symbol:<6} "
-            f"{trade.strategy:<5} {format_pnl(trade.pnl)} "
+            f"{trade.strategy:<12} {format_pnl(trade.pnl)} "
             f"{format_pnl_pct(pnl_pct)} {icon}{reason}"
         )
     if not recent_lines:
         recent_lines = ["  (no trades yet)"]
 
-    # Features status line
-    feat_parts = []
+    # Feature flags
+    feat_parts = ["MR60%", "PAIRS25%", "MICRO15%"]
+    if config.ALLOW_SHORT:
+        feat_parts.append("Short")
+    if config.WHATSAPP_ENABLED:
+        feat_parts.append("Notify")
+    if config.WEB_DASHBOARD_ENABLED:
+        feat_parts.append("Web")
     if config.WEBSOCKET_MONITORING:
         feat_parts.append("WS")
-    if config.USE_ML_FILTER:
-        feat_parts.append("ML")
-    if config.ALLOW_SHORT:
-        feat_parts.append("SHORT")
-    if config.GAP_GO_ENABLED:
-        feat_parts.append("GAP")
-    if config.USE_RS_FILTER:
-        feat_parts.append("RS")
-    if config.MTF_CONFIRMATION_ENABLED:
-        feat_parts.append("MTF")
-    if config.VIX_RISK_SCALING_ENABLED:
-        feat_parts.append("VIX")
-    if config.NEWS_FILTER_ENABLED:
-        feat_parts.append("NEWS")
-    if config.EMA_SCALP_ENABLED:
-        feat_parts.append("SCALP")
-    v3_str = f" | {'+'.join(feat_parts)}" if feat_parts else ""
+    feat_str = f" | {'+'.join(feat_parts)}"
 
     # Footer
     scan_time_str = last_scan_time.strftime("%H:%M:%S") if last_scan_time else "---"
-    earnings_str = f" | Earnings: {earnings_excluded} excl" if earnings_excluded > 0 else ""
     footer = (
         f"  Last scan: {scan_time_str} | "
-        f"{num_symbols} symbols | "
-        f"Signals today: {risk.signals_today}"
-        f"{earnings_str}{v3_str}\n"
+        f"{num_symbols} symbols"
+        f"{feat_str}\n"
         f"  Circuit breaker: {cb_text}"
     )
 
-    # Assemble
-    sep = f"{'─' * 68}"
+    # --- Assemble ---
+    sep = f"{'---' * 23}"
     content = f"[bold]{header}[/bold]\n{sep}\n"
 
-    # Portfolio + Metrics
+    # Portfolio + Risk State
     content += " PORTFOLIO\n" + "\n".join(portfolio_lines) + "\n"
+    content += f"{sep}\n RISK STATE\n" + "\n".join(risk_state_lines) + "\n"
 
     if metrics_lines:
         content += f"{sep}\n METRICS (this week)\n" + "\n".join(metrics_lines) + "\n"
 
+    content += f"{sep}\n STRATEGY ALLOCATION\n" + "\n".join(alloc_lines) + "\n"
     content += f"{sep}\n {pos_header}\n" + "\n".join(pos_lines) + "\n"
 
     if strat_lines:
         content += f"{sep}\n STRATEGY BREAKDOWN (this week)\n" + "\n".join(strat_lines) + "\n"
 
-    if alloc_lines:
-        content += f"{sep}\n CAPITAL ALLOCATION\n" + "\n".join(alloc_lines) + "\n"
-
     content += f"{sep}\n RECENT TRADES\n" + "\n".join(recent_lines) + "\n"
 
-    # --- V5: Trade Analysis ---
+    # Trade Analysis (kept from V5)
     try:
         from database import get_exit_reason_breakdown, get_filter_block_summary
 
         analysis_lines = []
 
-        # Exit reason breakdown
         exit_data = get_exit_reason_breakdown(days=7)
         if exit_data:
             analysis_lines.append("[bold]Exit Reasons (7d):[/bold]")
@@ -241,7 +256,6 @@ def build_dashboard(
                 color = "green" if avg >= 0 else "red"
                 analysis_lines.append(f"  {reason:<20} {count:>3} trades  avg [{color}]{avg:+.2f}[/{color}]")
 
-        # Filter block summary
         blocks = get_filter_block_summary()
         if blocks:
             analysis_lines.append("")
@@ -257,14 +271,20 @@ def build_dashboard(
 
     content += f"{sep}\n{footer}"
 
-    return Panel(content, title="[bold cyan]🤖 VELOX — Autonomous Trading System[/bold cyan]", border_style="cyan")
+    return Panel(
+        content,
+        title="[bold cyan]VELOX V6 -- Autonomous Algorithmic Trading System[/bold cyan]",
+        border_style="cyan",
+    )
 
 
-def print_day_summary(summary: dict):
+def print_day_summary(summary: dict, consistency_score: float = 0.0):
     """Print the end-of-day summary."""
     if summary.get("trades", 0) == 0:
         console.print("\n[yellow]=== DAY SUMMARY ===[/yellow]")
         console.print("  No trades today.")
+        if consistency_score > 0:
+            console.print(f"  Consistency Score: {consistency_score:.0f}/100")
         console.print("[yellow]===================[/yellow]\n")
         return
 
@@ -282,6 +302,10 @@ def print_day_summary(summary: dict):
             strat = key.replace("_win_rate", "").upper()
             console.print(f"  {strat} win rate:  {val}")
 
+    if consistency_score > 0:
+        cs_color = "green" if consistency_score >= 70 else "yellow" if consistency_score >= 40 else "red"
+        console.print(f"  Consistency:      [{cs_color}]{consistency_score:.0f}/100[/{cs_color}]")
+
     console.print("[bold yellow]===================[/bold yellow]\n")
 
 
@@ -297,6 +321,6 @@ def print_startup_info(info: dict):
         f"  Cash:    ${info['cash']:,.2f}\n"
         f"  Market:  {market}\n"
         f"  Next:    {info.get('next_open', 'N/A')}",
-        title="[bold green]CONNECTION VERIFIED[/bold green]",
+        title="[bold green]VELOX V6 -- CONNECTION VERIFIED[/bold green]",
         border_style="green",
     ))

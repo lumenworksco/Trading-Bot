@@ -155,6 +155,47 @@ def init_db():
         CREATE INDEX IF NOT EXISTS idx_signals_acted ON signals(acted_on);
         CREATE INDEX IF NOT EXISTS idx_shadow_strategy ON shadow_trades(strategy);
         CREATE INDEX IF NOT EXISTS idx_shadow_entry_time ON shadow_trades(entry_time);
+
+        -- V6: OU process parameters for mean reversion universe
+        CREATE TABLE IF NOT EXISTS ou_parameters (
+            symbol TEXT,
+            date TEXT,
+            kappa REAL,
+            mu REAL,
+            sigma REAL,
+            half_life REAL,
+            hurst REAL,
+            adf_pvalue REAL,
+            PRIMARY KEY (symbol, date)
+        );
+
+        -- V6: Kalman pairs for pairs trading
+        CREATE TABLE IF NOT EXISTS kalman_pairs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            symbol1 TEXT NOT NULL,
+            symbol2 TEXT NOT NULL,
+            hedge_ratio REAL,
+            spread_mean REAL,
+            spread_std REAL,
+            correlation REAL,
+            coint_pvalue REAL,
+            half_life REAL,
+            sector_group TEXT,
+            active INTEGER DEFAULT 1,
+            last_updated TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_kalman_active ON kalman_pairs(active);
+
+        -- V6: Daily consistency metrics
+        CREATE TABLE IF NOT EXISTS consistency_log (
+            date TEXT PRIMARY KEY,
+            consistency_score REAL,
+            pct_positive_days REAL,
+            sharpe REAL,
+            max_drawdown REAL,
+            vol_scalar_avg REAL,
+            beta_avg REAL
+        );
     """)
     conn.commit()
 
@@ -644,3 +685,132 @@ def get_filter_block_summary(date=None):
                    GROUP BY skip_reason ORDER BY count DESC"""
         rows = conn.execute(query, (str(date),)).fetchall()
     return {row["skip_reason"]: row["count"] for row in rows}
+
+
+# =============================================================================
+# V6: OU Parameters
+# =============================================================================
+
+def save_ou_parameters(symbol: str, date: str, kappa: float, mu: float,
+                       sigma: float, half_life: float, hurst: float,
+                       adf_pvalue: float):
+    """Save OU process parameters for a symbol."""
+    conn = _get_conn()
+    conn.execute(
+        """INSERT OR REPLACE INTO ou_parameters
+           (symbol, date, kappa, mu, sigma, half_life, hurst, adf_pvalue)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+        (symbol, date, kappa, mu, sigma, half_life, hurst, adf_pvalue),
+    )
+    conn.commit()
+
+
+def get_ou_parameters(symbol: str, date: str) -> dict | None:
+    """Get OU parameters for a symbol on a specific date."""
+    conn = _get_conn()
+    row = conn.execute(
+        "SELECT * FROM ou_parameters WHERE symbol = ? AND date = ?",
+        (symbol, date),
+    ).fetchone()
+    return dict(row) if row else None
+
+
+def get_mr_universe(date: str) -> list[dict]:
+    """Get all symbols that passed MR universe filter on a date."""
+    conn = _get_conn()
+    rows = conn.execute(
+        "SELECT * FROM ou_parameters WHERE date = ? ORDER BY hurst ASC",
+        (date,),
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+# =============================================================================
+# V6: Kalman Pairs
+# =============================================================================
+
+def save_kalman_pair(symbol1: str, symbol2: str, hedge_ratio: float,
+                     spread_mean: float, spread_std: float, correlation: float,
+                     coint_pvalue: float, half_life: float, sector_group: str):
+    """Save or update a Kalman pair."""
+    conn = _get_conn()
+    # Check if pair exists
+    existing = conn.execute(
+        "SELECT id FROM kalman_pairs WHERE symbol1 = ? AND symbol2 = ? AND active = 1",
+        (symbol1, symbol2),
+    ).fetchone()
+
+    now_str = __import__('datetime').datetime.now().isoformat()
+
+    if existing:
+        conn.execute(
+            """UPDATE kalman_pairs SET hedge_ratio=?, spread_mean=?, spread_std=?,
+               correlation=?, coint_pvalue=?, half_life=?, sector_group=?,
+               last_updated=? WHERE id=?""",
+            (hedge_ratio, spread_mean, spread_std, correlation, coint_pvalue,
+             half_life, sector_group, now_str, existing['id']),
+        )
+    else:
+        conn.execute(
+            """INSERT INTO kalman_pairs
+               (symbol1, symbol2, hedge_ratio, spread_mean, spread_std,
+                correlation, coint_pvalue, half_life, sector_group, last_updated)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (symbol1, symbol2, hedge_ratio, spread_mean, spread_std,
+             correlation, coint_pvalue, half_life, sector_group, now_str),
+        )
+    conn.commit()
+
+
+def get_active_kalman_pairs() -> list[dict]:
+    """Get all active Kalman pairs."""
+    conn = _get_conn()
+    rows = conn.execute(
+        "SELECT * FROM kalman_pairs WHERE active = 1 ORDER BY coint_pvalue ASC"
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def deactivate_kalman_pair(pair_id: int):
+    """Deactivate a Kalman pair."""
+    conn = _get_conn()
+    conn.execute("UPDATE kalman_pairs SET active = 0 WHERE id = ?", (pair_id,))
+    conn.commit()
+
+
+def deactivate_all_kalman_pairs():
+    """Deactivate all pairs (before weekly re-selection)."""
+    conn = _get_conn()
+    conn.execute("UPDATE kalman_pairs SET active = 0")
+    conn.commit()
+
+
+# =============================================================================
+# V6: Consistency Log
+# =============================================================================
+
+def save_consistency_log(date: str, consistency_score: float,
+                         pct_positive: float, sharpe: float,
+                         max_drawdown: float, vol_scalar_avg: float = 0.0,
+                         beta_avg: float = 0.0):
+    """Save daily consistency metrics."""
+    conn = _get_conn()
+    conn.execute(
+        """INSERT OR REPLACE INTO consistency_log
+           (date, consistency_score, pct_positive_days, sharpe, max_drawdown,
+            vol_scalar_avg, beta_avg)
+           VALUES (?, ?, ?, ?, ?, ?, ?)""",
+        (date, consistency_score, pct_positive, sharpe, max_drawdown,
+         vol_scalar_avg, beta_avg),
+    )
+    conn.commit()
+
+
+def get_consistency_log(days: int = 30) -> list[dict]:
+    """Get recent consistency log entries."""
+    conn = _get_conn()
+    rows = conn.execute(
+        "SELECT * FROM consistency_log ORDER BY date DESC LIMIT ?",
+        (days,),
+    ).fetchall()
+    return [dict(r) for r in rows]
