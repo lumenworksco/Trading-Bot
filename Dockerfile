@@ -5,7 +5,7 @@ RUN groupadd -r botuser && useradd -r -g botuser -m botuser
 
 WORKDIR /app
 
-# Install dependencies
+# Install dependencies (cached layer)
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
@@ -13,7 +13,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY . .
 
 # Create directories for persistent data
-RUN mkdir -p data logs models && chown -R botuser:botuser /app
+RUN mkdir -p data logs && chown -R botuser:botuser /app
 
 USER botuser
 
