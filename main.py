@@ -1,8 +1,9 @@
-"""Entry point V6 — Velox V6 Autonomous Trading System.
+"""Entry point V7 — Velox V7 Autonomous Trading System.
 
-Three-strategy portfolio with volatility-targeted sizing, daily P&L locks,
-and beta neutralization.  Strategies: StatMeanReversion (60%),
-KalmanPairsTrader (25%), IntradayMicroMomentum (15%).
+Five-strategy portfolio with volatility-targeted sizing, daily P&L locks,
+beta neutralization, news sentiment, optional LLM scoring, and adaptive exits.
+
+Strategies: StatMR (50%), VWAP (20%), KalmanPairs (20%), ORB (5%), MicroMom (5%).
 """
 
 import argparse
@@ -28,6 +29,12 @@ from strategies.regime import MarketRegime
 from strategies.stat_mean_reversion import StatMeanReversion
 from strategies.kalman_pairs import KalmanPairsTrader
 from strategies.micro_momentum import IntradayMicroMomentum
+from strategies.vwap import VWAPStrategy
+
+try:
+    from strategies.orb_v2 import ORBStrategyV2
+except ImportError:
+    ORBStrategyV2 = None
 from risk import (
     RiskManager, TradeRecord,
     VolatilityTargetingRiskEngine, DailyPnLLock, BetaNeutralizer,
@@ -64,6 +71,21 @@ try:
     import notifications
 except ImportError:
     notifications = None
+
+try:
+    from news_sentiment import AlpacaNewsSentiment
+except ImportError:
+    AlpacaNewsSentiment = None
+
+try:
+    from llm_signal_scorer import LLMSignalScorer
+except ImportError:
+    LLMSignalScorer = None
+
+try:
+    from adaptive_exit_manager import AdaptiveExitManager
+except ImportError:
+    AdaptiveExitManager = None
 
 # --- Logging setup ---
 _file_handler = logging.FileHandler(config.LOG_FILE)
@@ -143,18 +165,35 @@ def startup_checks() -> dict:
 # ---------------------------------------------------------------------------
 
 def sync_positions_with_broker(risk: RiskManager, now: datetime, ws_monitor=None):
-    """Sync open trades with actual broker positions to detect fills/stops."""
+    """Sync open trades with actual broker positions.
+
+    FIXED in V7: When a position disappears from broker, fetch the last
+    known market price for accurate P&L instead of using entry_price (which
+    produced 0 P&L for all broker_sync exits).
+
+    Unknown broker positions (ones we never opened) are logged as warnings
+    and optionally auto-closed if CLOSE_UNKNOWN_POSITIONS=True.
+    """
     try:
         broker_positions = {p.symbol: p for p in get_positions()}
     except Exception as e:
         logger.error(f"Failed to fetch positions: {e}")
         return
 
+    # Close our DB records for positions the broker no longer has
     for symbol in list(risk.open_trades.keys()):
         if symbol not in broker_positions:
             trade = risk.open_trades[symbol]
-            risk.close_trade(symbol, trade.entry_price, now, exit_reason="broker_sync")
-            logger.info(f"Position {symbol} no longer at broker -- marking closed")
+
+            # Fetch last known price for accurate P&L
+            try:
+                snap = get_snapshot(symbol)
+                exit_price = float(snap.latest_trade.price) if snap and snap.latest_trade else trade.entry_price
+            except Exception:
+                exit_price = trade.entry_price
+
+            risk.close_trade(symbol, exit_price, now, exit_reason="broker_sync")
+            logger.info(f"Position {symbol} no longer at broker — closed at ${exit_price:.2f} (entry ${trade.entry_price:.2f})")
 
             if ws_monitor:
                 ws_monitor.unsubscribe(symbol)
@@ -163,6 +202,19 @@ def sync_positions_with_broker(risk: RiskManager, now: datetime, ws_monitor=None
                     notifications.notify_trade_closed(trade)
                 except Exception:
                     pass
+
+    # Warn about unknown broker positions (don't create fake records)
+    our_symbols = set(risk.open_trades.keys())
+    for symbol in broker_positions:
+        if symbol not in our_symbols and symbol != "SPY":  # SPY may be beta hedge
+            bp = broker_positions[symbol]
+            logger.warning(f"Unknown broker position: {symbol} qty={bp.qty} — not in our records")
+            if getattr(config, "CLOSE_UNKNOWN_POSITIONS", False):
+                try:
+                    close_position(symbol, reason="unknown_position_cleanup")
+                    logger.info(f"Auto-closed unknown position: {symbol}")
+                except Exception as e:
+                    logger.error(f"Failed to auto-close unknown position {symbol}: {e}")
 
     try:
         account = get_account()
@@ -225,11 +277,13 @@ def process_signals(
     vol_engine: VolatilityTargetingRiskEngine,
     pnl_lock: DailyPnLLock,
     ws_monitor=None,
+    news_sentiment=None,
+    llm_scorer=None,
 ):
     """Process signals: check filters, risk, size, and submit orders.
 
-    V6 filters kept: position conflict, earnings, correlation (skip for KALMAN_PAIRS),
-    short pre-check.  Removed: ML, RS, MTF, news, VIX halt, shadow mode.
+    V7 filters: position conflict, earnings, correlation, short pre-check,
+    news sentiment (soft), LLM scoring (optional).
     """
 
     # PnL lock check
@@ -250,7 +304,8 @@ def process_signals(
 
     # Process non-pair signals
     for signal in non_pair_signals:
-        _process_single_signal(signal, risk, regime, now, vol_engine, pnl_lock, ws_monitor)
+        _process_single_signal(signal, risk, regime, now, vol_engine, pnl_lock, ws_monitor,
+                               news_sentiment, llm_scorer)
 
     # Process pairs atomically (both legs or neither)
     for pair_id, pair_signals in pair_groups.items():
@@ -270,7 +325,8 @@ def process_signals(
 
         if all_ok:
             for sig in pair_signals:
-                _process_single_signal(sig, risk, regime, now, vol_engine, pnl_lock, ws_monitor)
+                _process_single_signal(sig, risk, regime, now, vol_engine, pnl_lock, ws_monitor,
+                                       news_sentiment, llm_scorer)
         else:
             for sig in pair_signals:
                 database.log_signal(now, sig.symbol, sig.strategy, sig.side, False, "pair_blocked")
@@ -284,8 +340,10 @@ def _process_single_signal(
     vol_engine: VolatilityTargetingRiskEngine,
     pnl_lock: DailyPnLLock,
     ws_monitor=None,
+    news_sentiment=None,
+    llm_scorer=None,
 ):
-    """Process a single signal through V6 filters and submit if valid."""
+    """Process a single signal through V7 filters and submit if valid."""
     skip_reason = ""
 
     # 1. Position conflict
@@ -329,6 +387,35 @@ def _process_single_signal(
         database.log_signal(now, signal.symbol, signal.strategy, signal.side, False, skip_reason)
         return
 
+    # 5b. V7: News sentiment size adjustment (soft filter)
+    news_mult = 1.0
+    if news_sentiment:
+        try:
+            news_mult, news_reason = news_sentiment.get_sentiment_size_mult(signal.symbol)
+            if news_mult == 0.0:
+                database.log_signal(now, signal.symbol, signal.strategy, signal.side, False, news_reason)
+                return
+        except Exception:
+            news_mult = 1.0
+
+    # 5c. V7: LLM signal scoring (optional, fail-open)
+    llm_mult = 1.0
+    if llm_scorer and config.LLM_SCORING_ENABLED:
+        try:
+            context = {
+                'spy_day_return': risk.day_pnl,
+                'vix_level': getattr(vol_engine, '_last_vix', 20.0),
+            }
+            scored = llm_scorer.score_signal(signal, context)
+            if scored.score < config.LLM_SCORE_THRESHOLD:
+                database.log_signal(now, signal.symbol, signal.strategy, signal.side, False,
+                                   f'llm_low_score_{scored.score:.2f}')
+                return
+            if config.LLM_SCORE_SIZE_MULT:
+                llm_mult = scored.size_mult
+        except Exception:
+            llm_mult = 1.0
+
     # 6. Position sizing via vol-targeting engine
     vol_scalar = vol_engine.last_scalar
     lock_mult = pnl_lock.get_size_multiplier()
@@ -341,6 +428,10 @@ def _process_single_signal(
         side=signal.side,
         pnl_lock_mult=lock_mult,
     )
+
+    # Apply news + LLM multipliers
+    qty = int(qty * news_mult * llm_mult)
+
     if qty <= 0:
         skip_reason = "position_size_zero"
         logger.info(f"Position size 0 for {signal.symbol}, skipping")
@@ -537,15 +628,36 @@ def main():
     # Startup checks
     info = startup_checks()
 
-    # --- V6 strategy initialization ---
+    # --- V7 strategy initialization ---
     stat_mr = StatMeanReversion()
     kalman_pairs = KalmanPairsTrader()
     micro_mom = IntradayMicroMomentum()
+    vwap_strategy = VWAPStrategy()
+    orb_strategy = ORBStrategyV2() if ORBStrategyV2 and config.ORB_ENABLED else None
 
-    # V6 risk engine
+    # V7 risk engine
     vol_engine = VolatilityTargetingRiskEngine()
     pnl_lock = DailyPnLLock()
     beta_neutral = BetaNeutralizer()
+
+    # V7 optional modules
+    news_sentiment = None
+    if config.NEWS_SENTIMENT_ENABLED and AlpacaNewsSentiment:
+        try:
+            news_sentiment = AlpacaNewsSentiment(config.ALPACA_API_KEY, config.ALPACA_API_SECRET)
+            logger.info("News sentiment filter enabled")
+        except Exception as e:
+            logger.warning(f"News sentiment init failed: {e}")
+
+    llm_scorer = None
+    if config.LLM_SCORING_ENABLED and LLMSignalScorer:
+        try:
+            llm_scorer = LLMSignalScorer()
+            logger.info("LLM signal scoring enabled")
+        except Exception as e:
+            logger.warning(f"LLM scorer init failed: {e}")
+
+    adaptive_exits = AdaptiveExitManager() if AdaptiveExitManager and config.ADAPTIVE_EXITS_ENABLED else None
 
     # Regime detector (kept)
     regime_detector = MarketRegime()
@@ -617,9 +729,52 @@ def main():
         features.append("WS")
 
     features_str = ", ".join(features)
-    console.print(f"\n[bold green]Velox V6 is running. Press Ctrl+C to stop.[/bold green]")
+    console.print(f"\n[bold green]Velox V7 is running. Press Ctrl+C to stop.[/bold green]")
     console.print(f"[dim]Strategies: STAT_MR + KALMAN_PAIRS + MICRO_MOM[/dim]")
     console.print(f"[dim]Features: {features_str}[/dim]\n")
+
+    # -----------------------------------------------------------------------
+    # V7 FIX: Initialize strategies at startup (don't wait for scheduled times)
+    # -----------------------------------------------------------------------
+    startup_now = now_et()
+    if is_market_hours(startup_now.time()) or startup_now.time() >= config.MR_UNIVERSE_PREP_TIME:
+        console.print("[cyan]Preparing StatMR universe at startup...[/cyan]")
+        try:
+            stat_mr.prepare_universe(config.STANDARD_SYMBOLS, startup_now)
+            universe_prepared_today = True
+            console.print(f"[green]StatMR universe ready: {len(stat_mr.universe)} symbols[/green]")
+            # Save OU params to database
+            for sym, ou in stat_mr.ou_params.items():
+                try:
+                    database.save_ou_parameters(sym, ou)
+                except Exception:
+                    pass
+        except Exception as e:
+            console.print(f"[yellow]StatMR universe prep failed: {e}[/yellow]")
+
+    # Initialize Kalman pairs if empty or stale
+    try:
+        active_pairs_count = len(database.get_active_kalman_pairs())
+    except Exception:
+        active_pairs_count = 0
+
+    if active_pairs_count == 0:
+        console.print("[cyan]Initializing Kalman pairs at startup (none active)...[/cyan]")
+        try:
+            kalman_pairs.select_pairs_weekly(startup_now)
+            console.print(f"[green]Kalman pairs ready: {len(kalman_pairs.active_pairs)} pairs[/green]")
+        except Exception as e:
+            console.print(f"[yellow]Kalman pairs init failed: {e}[/yellow]")
+    else:
+        # Load existing pairs from DB into memory
+        try:
+            db_pairs = database.get_active_kalman_pairs()
+            kalman_pairs.active_pairs = [
+                (p['symbol_a'], p['symbol_b']) for p in db_pairs
+            ]
+            console.print(f"[green]Kalman pairs loaded from DB: {len(kalman_pairs.active_pairs)} pairs[/green]")
+        except Exception as e:
+            console.print(f"[yellow]Failed to load Kalman pairs from DB: {e}[/yellow]")
 
     # Stop logging to terminal -- dashboard takes over
     logging.getLogger().removeHandler(_stream_handler)
@@ -649,9 +804,17 @@ def main():
                     logger.info("New trading day -- resetting state")
                     stat_mr.reset_daily()
                     micro_mom.reset_daily()
+                    vwap_strategy.reset_daily()
                     pnl_lock.reset_daily()
                     beta_neutral.reset_daily()
                     # kalman_pairs.reset_daily() -- does nothing (pairs persist weekly)
+                    if orb_strategy:
+                        orb_strategy.reset_daily()
+                        orb_strategy._ranges_recorded_today = False
+                    if news_sentiment:
+                        news_sentiment.clear_daily_cache()
+                    if llm_scorer:
+                        llm_scorer.reset_daily()
                     universe_prepared_today = False
 
                     try:
@@ -697,6 +860,12 @@ def main():
                             stat_mr.prepare_universe(config.STANDARD_SYMBOLS, current)
                             universe_prepared_today = True
                             logger.info(f"MR universe prepared: {len(stat_mr.universe)} symbols")
+                            # Save OU params to database for diagnostics
+                            for sym, ou in stat_mr.ou_params.items():
+                                try:
+                                    database.save_ou_parameters(sym, ou)
+                                except Exception:
+                                    pass
                         except Exception as e:
                             logger.error(f"MR universe prep failed: {e}")
 
@@ -707,6 +876,25 @@ def main():
                                 logger.info(f"Monday pair selection: {len(kalman_pairs.active_pairs)} pairs")
                             except Exception as e:
                                 logger.error(f"Monday pair selection failed: {e}")
+
+                    # V7: ORB opening range recording at 10:00 AM
+                    if orb_strategy and current_time >= time(10, 0) and not getattr(orb_strategy, '_ranges_recorded_today', False):
+                        try:
+                            from data import get_intraday_bars
+                            from alpaca.data.timeframe import TimeFrame
+                            market_open = datetime(current.year, current.month, current.day, 9, 30, tzinfo=config.ET)
+                            orb_10am = datetime(current.year, current.month, current.day, 10, 0, tzinfo=config.ET)
+                            for symbol in config.STANDARD_SYMBOLS[:config.ORB_SCAN_SYMBOLS]:
+                                try:
+                                    bars_930_1000 = get_intraday_bars(symbol, TimeFrame.Minute, start=market_open, end=orb_10am)
+                                    if bars_930_1000 is not None and not bars_930_1000.empty:
+                                        orb_strategy.record_opening_range(symbol, bars_930_1000)
+                                except Exception:
+                                    pass
+                            orb_strategy._ranges_recorded_today = True
+                            logger.info(f"ORB opening ranges recorded: {len(orb_strategy.opening_ranges)} symbols")
+                        except Exception as e:
+                            logger.error(f"ORB opening range recording failed: {e}")
 
                     # Trading hours scan
                     if is_trading_hours(current_time):
@@ -719,7 +907,7 @@ def main():
                         except Exception as e:
                             logger.error(f"Micro event detection failed: {e}")
 
-                        # 3. Scan all three strategies
+                        # 3. Scan all five strategies
                         signals: list[Signal] = []
 
                         try:
@@ -729,10 +917,25 @@ def main():
                             logger.error(f"StatMR scan failed: {e}")
 
                         try:
+                            vwap_signals = vwap_strategy.scan(
+                                config.STANDARD_SYMBOLS, current, regime
+                            )
+                            signals.extend(vwap_signals)
+                        except Exception as e:
+                            logger.error(f"VWAP scan failed: {e}")
+
+                        try:
                             pair_signals = kalman_pairs.scan(current, regime)
                             signals.extend(pair_signals)
                         except Exception as e:
                             logger.error(f"KalmanPairs scan failed: {e}")
+
+                        if orb_strategy:
+                            try:
+                                orb_signals = orb_strategy.scan(current, regime)
+                                signals.extend(orb_signals)
+                            except Exception as e:
+                                logger.error(f"ORB scan failed: {e}")
 
                         try:
                             micro_signals = micro_mom.scan(
@@ -747,6 +950,7 @@ def main():
                             process_signals(
                                 signals, risk, regime, current,
                                 vol_engine, pnl_lock, ws_monitor,
+                                news_sentiment, llm_scorer,
                             )
 
                         # 5. Check strategy exits
@@ -770,6 +974,14 @@ def main():
                                 _handle_strategy_exits(micro_exits, risk, current, ws_monitor)
                         except Exception as e:
                             logger.error(f"MicroMom exit check failed: {e}")
+
+                        if orb_strategy:
+                            try:
+                                orb_exits = orb_strategy.check_exits(risk.open_trades, current)
+                                if orb_exits:
+                                    _handle_strategy_exits(orb_exits, risk, current, ws_monitor)
+                            except Exception as e:
+                                logger.error(f"ORB exit check failed: {e}")
 
                         # 6. Beta neutralization (every BETA_CHECK_INTERVAL_MIN)
                         if beta_neutral.should_check_now(current):
@@ -804,7 +1016,7 @@ def main():
                     if current_time >= config.ORB_EXIT_TIME:
                         for symbol in list(risk.open_trades.keys()):
                             trade = risk.open_trades[symbol]
-                            if trade.hold_type == "day" and trade.strategy in ("MICRO_MOM", "BETA_HEDGE"):
+                            if trade.hold_type == "day" and trade.strategy in ("MICRO_MOM", "BETA_HEDGE", "ORB", "VWAP"):
                                 try:
                                     close_position(symbol, reason="eod_close")
                                     try:

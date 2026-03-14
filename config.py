@@ -39,6 +39,29 @@ BEARISH_SIZE_CUT = 0.40
 EARNINGS_FILTER_DAYS = 2            # Skip symbols with earnings within 2 days
 CORRELATION_THRESHOLD = 0.88        # Skip if correlated > 88% with open position
 
+# --- V4: VIX Risk Scaling ---
+VIX_RISK_SCALING_ENABLED = True
+VIX_HALT_THRESHOLD = 40             # Halt all new positions above VIX 40
+VIX_CACHE_SECONDS = 300             # Cache VIX value for 5 minutes
+
+# --- Legacy strategy limits (backward-compat for risk_manager.py) ---
+MAX_MOMENTUM_POSITIONS = 4
+MAX_SECTOR_POSITIONS = 3
+MAX_PAIRS_POSITIONS = 5
+GAP_MAX_POSITIONS = 3
+GAP_GO_ENABLED = False
+SECTOR_ROTATION_ENABLED = False
+SECTOR_POSITION_SIZE_PCT = 0.05
+EMA_SCALP_MAX_POSITIONS = 3
+NEWS_FILTER_ENABLED = False
+NEWS_LOOKBACK_HOURS = 6
+ADVANCED_EXITS_ENABLED = False       # Superseded by ADAPTIVE_EXITS_ENABLED
+SCALED_TP_ENABLED = False            # Superseded by adaptive exits
+TRAILING_STOP_PCT = 0.015
+BREAKEVEN_STOP_ENABLED = True
+ATR_EXPANSION_MULT = 2.5
+RSI_EXIT_THRESHOLD = 70
+
 # --- Market Hours (ET) ---
 MARKET_OPEN = time(9, 30)
 ORB_END = time(10, 0)
@@ -171,9 +194,11 @@ ASYNC_MODE = os.getenv("ASYNC_MODE", "false") == "true"
 
 # --- V6: Strategy Allocations ---
 STRATEGY_ALLOCATIONS = {
-    'STAT_MR': 0.60,
-    'KALMAN_PAIRS': 0.25,
-    'MICRO_MOM': 0.15,
+    'STAT_MR': 0.50,
+    'VWAP': 0.20,
+    'KALMAN_PAIRS': 0.20,
+    'ORB': 0.05,
+    'MICRO_MOM': 0.05,
 }
 
 # --- V6: Statistical Mean Reversion ---
@@ -253,6 +278,60 @@ SCAN_INTERVAL_SEC = 120
 # --- WebSocket Position Monitoring ---
 WEBSOCKET_MONITORING = True
 WEBSOCKET_RECONNECT_SEC = 5
+
+# =============================================================================
+# V7 ADDITIONS — Bug Fixes + New Features
+# =============================================================================
+
+# --- V7: Bug Fixes ---
+CLOSE_UNKNOWN_POSITIONS = False  # Auto-close broker positions we didn't open
+
+# --- V7: MTF per-strategy control ---
+MTF_ENABLED_FOR = {
+    'STAT_MR':      False,   # Mean reversion = counter-trend by definition
+    'VWAP':         False,   # Same as above
+    'KALMAN_PAIRS': False,   # Market neutral — trend direction irrelevant
+    'ORB':          True,    # Breakout benefits from trend confirmation
+    'MICRO_MOM':    True,    # Momentum requires trend alignment
+    'GAP_GO':       False,   # Gap fills are counter-trend
+}
+
+# --- V7: ORB v2 ---
+ORB_ENABLED          = True
+ORB_VOLUME_RATIO     = 1.3        # Lowered from 1.5 — more signals
+ORB_MAX_GAP_PCT      = 0.04       # Skip if gap > 4%
+ORB_MAX_RANGE_PCT    = 0.035      # Skip if range > 3.5%
+ORB_MIN_STOP_PCT     = 0.003      # Minimum 0.3% stop distance
+ORB_SCAN_SYMBOLS     = 15         # Top N by morning volume
+ORB_ACTIVE_UNTIL     = time(11, 30)
+
+# --- V7: VWAP v2 ---
+VWAP_OU_ZSCORE_MIN   = 1.0        # OU z-score confirmation for VWAP entries
+VWAP_MAX_SPREAD_PCT  = 0.001      # Skip if bid-ask spread > 0.1%
+VWAP_VOLUME_RATIO    = 0.8        # Relaxed from 1.2 — more signals
+
+# --- V7: LLM Signal Scoring ---
+LLM_SCORING_ENABLED    = os.getenv('LLM_SCORING_ENABLED', 'false') == 'true'
+LLM_SCORE_THRESHOLD    = 0.45
+LLM_SCORE_SIZE_MULT    = True
+LLM_MAX_DAILY_COST_USD = 0.10
+ANTHROPIC_API_KEY      = os.getenv('ANTHROPIC_API_KEY', '')
+
+# --- V7: News Sentiment (Alpaca) ---
+NEWS_SENTIMENT_ENABLED = True
+NEWS_CACHE_TTL_MIN     = 30
+
+# --- V7: Walk-Forward Validation ---
+WALK_FORWARD_ENABLED    = True
+WALK_FORWARD_MIN_SHARPE = 0.3     # Demote if OOS Sharpe < 0.3
+WALK_FORWARD_SYMBOLS    = 20      # Symbols to use in validation
+
+# --- V7: Adaptive Exits ---
+ADAPTIVE_EXITS_ENABLED = True
+
+# --- V7: Relaxed Filters ---
+CORRELATION_THRESHOLD  = 0.92     # Raised from 0.88 — less blocking
+RS_SCORE_MIN_LONG      = 0.10     # Lowered from 0.2 — more signals
 
 # --- Runtime-mutable strategy parameters (can be updated by optimizer) ---
 _runtime_params: dict = {}

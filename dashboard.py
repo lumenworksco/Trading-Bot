@@ -70,7 +70,7 @@ def build_dashboard(
     )
 
     # Header
-    header = f"  VELOX V6 | {mode} MODE | Regime: {regime_text} | PnL Lock: {lock_text} | Up: {uptime}"
+    header = f"  VELOX V7 | {mode} MODE | Regime: {regime_text} | PnL Lock: {lock_text} | Up: {uptime}"
 
     # Portfolio section
     day_pnl_dollars = risk.day_pnl * risk.starting_equity if risk.starting_equity else 0
@@ -106,7 +106,7 @@ def build_dashboard(
         strat_counts[trade.strategy] = strat_counts.get(trade.strategy, 0) + 1
 
     alloc_lines = []
-    for strat_name, display_name in [("STAT_MR", "MR"), ("KALMAN_PAIRS", "PAIRS"), ("MICRO_MOM", "MICRO")]:
+    for strat_name, display_name in [("STAT_MR", "MR"), ("VWAP", "VWAP"), ("KALMAN_PAIRS", "PAIRS"), ("ORB", "ORB"), ("MICRO_MOM", "MICRO")]:
         weight = alloc_map.get(strat_name, 0)
         count = strat_counts.get(strat_name, 0)
         bar_len = int(weight * 30)
@@ -144,6 +144,10 @@ def build_dashboard(
                 extra = f" [{trade.pair_id[:8]}]"
         elif trade.strategy == "MICRO_MOM":
             strat_display = "[yellow]MICRO[/yellow]"
+        elif trade.strategy == "VWAP":
+            strat_display = "[green]VWAP[/green]"
+        elif trade.strategy == "ORB":
+            strat_display = "[white]ORB[/white]"
         elif trade.strategy == "BETA_HEDGE":
             strat_display = "[magenta]HEDGE[/magenta]"
 
@@ -201,7 +205,7 @@ def build_dashboard(
         recent_lines = ["  (no trades yet)"]
 
     # Feature flags
-    feat_parts = ["MR60%", "PAIRS25%", "MICRO15%"]
+    feat_parts = ["MR50%", "VWAP20%", "PAIRS20%", "ORB5%", "MICRO5%"]
     if config.ALLOW_SHORT:
         feat_parts.append("Short")
     if config.TELEGRAM_ENABLED:
@@ -273,7 +277,7 @@ def build_dashboard(
 
     return Panel(
         content,
-        title="[bold cyan]VELOX V6 -- Autonomous Algorithmic Trading System[/bold cyan]",
+        title="[bold cyan]VELOX V7 -- Autonomous Algorithmic Trading System[/bold cyan]",
         border_style="cyan",
     )
 
@@ -321,6 +325,6 @@ def print_startup_info(info: dict):
         f"  Cash:    ${info['cash']:,.2f}\n"
         f"  Market:  {market}\n"
         f"  Next:    {info.get('next_open', 'N/A')}",
-        title="[bold green]VELOX V6 -- CONNECTION VERIFIED[/bold green]",
+        title="[bold green]VELOX V7 -- CONNECTION VERIFIED[/bold green]",
         border_style="green",
     ))

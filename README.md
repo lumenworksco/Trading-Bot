@@ -1,12 +1,12 @@
-# Velox V6 — Autonomous Algorithmic Trading System
+# Velox V7 — Autonomous Algorithmic Trading System
 
 ![CI](https://github.com/lumenworksco/Velox-Trader/actions/workflows/ci.yml/badge.svg)
 ![Python 3.12+](https://img.shields.io/badge/python-3.12%2B-blue)
 ![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)
 
-An autonomous equity trading system built on the Alpaca API, targeting consistent low-variance returns through statistical mean reversion. Features volatility-targeted position sizing, daily P&L locking, beta neutralization, and a real-time web dashboard.
+An autonomous equity trading system built on the Alpaca API, targeting consistent low-variance returns through a diversified multi-strategy engine. Features statistical mean reversion, pairs trading, VWAP hybrid entries, ORB breakouts, news sentiment filtering, optional LLM signal scoring, and adaptive VIX-aware exits.
 
-**Philosophy:** V6 abandons momentum-chasing (V1-V5) in favor of mean reversion. Targets 0.3-0.8% per trade, 65-75% win rate, 15-30 trades/day, and 0.5-1.5% daily P&L.
+**Philosophy:** Consistent returns over big wins. Target 0.3–0.8% per trade, 65–75% win rate, 15–25 trades/day across 5 active strategies.
 
 ---
 
@@ -27,6 +27,8 @@ export ALPACA_LIVE=false                  # true for live trading
 export TELEGRAM_ENABLED=false              # optional
 export TELEGRAM_BOT_TOKEN=""              # from @BotFather
 export TELEGRAM_CHAT_ID=""                # your chat ID
+export LLM_SCORING_ENABLED=false          # optional Claude Haiku scoring
+export ANTHROPIC_API_KEY=""               # required if LLM scoring enabled
 ```
 
 Run:
@@ -41,17 +43,22 @@ python main.py
 
 | Strategy | Allocation | Type | Hold | Description |
 |---|---|---|---|---|
-| **StatMeanReversion** | 60% | Mean Reversion | Intraday | OU process z-score entries with Hurst/ADF filtering |
-| **KalmanPairsTrader** | 25% | Market-Neutral | Multi-day | Kalman filter dynamic hedge ratios on cointegrated pairs |
-| **IntradayMicroMomentum** | 15% | Event-Driven | 8 min | SPY volume spike detection, high-beta stock scalps |
+| **StatMeanReversion** | 50% | Mean Reversion | Intraday | OU process z-score entries with Hurst/ADF filtering on 2-min intraday bars |
+| **VWAP v2 Hybrid** | 20% | Mean Reversion | Intraday | VWAP + OU z-score dual confirmation with bid-ask spread filter |
+| **KalmanPairsTrader** | 20% | Market-Neutral | Multi-day | Kalman filter dynamic hedge ratios on cointegrated sector pairs |
+| **ORB v2** | 5% | Breakout | Day | Opening range breakout with gap/range quality filters (10:00–11:30 AM) |
+| **IntradayMicroMomentum** | 5% | Event-Driven | 8 min | SPY volume spike detection, high-beta stock scalps |
 
 ### How It Works
 
-1. **9:00 AM** — StatMR filters 128 symbols by Hurst exponent (<0.52), ADF stationarity, and OU half-life (1-48h) to build a universe of ~40 mean-reverting candidates
-2. **9:30 AM** — 2-minute scan cycle begins: all three strategies scan for signals every 120 seconds
-3. **Ongoing** — Z-score based entries (|z| > 1.5) and exits (|z| < 0.2), with partial exits at |z| < 0.5 and stops at |z| > 2.5
-4. **Every 15 min** — Beta neutralizer checks portfolio beta and hedges with SPY if |beta| > 0.3
-5. **Weekly (Monday)** — KalmanPairs selects top 15 cointegrated pairs within sector groups
+1. **9:00 AM** — StatMR filters 128+ symbols by Hurst exponent (<0.52), ADF stationarity, and OU half-life (1–48h) to build a universe of ~40 mean-reverting candidates
+2. **9:30–10:00 AM** — ORB v2 records opening ranges for top 15 symbols by pre-market volume
+3. **9:30 AM** — 2-minute scan cycle begins: all five strategies scan for signals every 120 seconds
+4. **Signal processing** — News sentiment (Alpaca headlines) applies soft size multiplier; optional LLM scoring gates low-conviction signals
+5. **Ongoing** — Z-score based entries/exits for MR and VWAP; spread convergence for pairs; volume-confirmed breakouts for ORB
+6. **Every 15 min** — Beta neutralizer checks portfolio beta and hedges with SPY if |beta| > 0.3
+7. **Weekly (Monday)** — KalmanPairs selects top 15 cointegrated pairs within sector groups
+8. **Weekly** — Walk-forward validator checks OOS Sharpe, auto-demotes underperforming strategies
 
 ---
 
@@ -70,12 +77,18 @@ trading_bot/
   notifications.py         # Telegram trade alerts
   earnings.py              # Earnings calendar filter
   correlation.py           # Correlation-based position conflict filter
+  news_sentiment.py        # Alpaca News API keyword-based sentiment filter
+  llm_signal_scorer.py     # Optional Claude Haiku signal scoring (fail-open)
+  adaptive_exit_manager.py # VIX-aware adaptive exit parameters
+  walk_forward.py          # Weekly walk-forward OOS validation
   strategies/
     base.py                # Signal dataclass, shared types
     regime.py              # SPY EMA market regime detection
-    stat_mean_reversion.py # OU z-score mean reversion (60%)
-    kalman_pairs.py        # Kalman filter pairs trading (25%)
-    micro_momentum.py      # SPY vol spike micro momentum (15%)
+    stat_mean_reversion.py # OU z-score mean reversion (50%)
+    vwap.py                # VWAP + OU hybrid entries (20%)
+    kalman_pairs.py        # Kalman filter pairs trading (20%)
+    orb_v2.py              # Opening range breakout v2 (5%)
+    micro_momentum.py      # SPY vol spike micro momentum (5%)
     archive/               # V1-V5 strategies (preserved)
   risk/
     risk_manager.py        # Trade tracking, circuit breaker, position limits
@@ -86,10 +99,37 @@ trading_bot/
     ou_tools.py            # Ornstein-Uhlenbeck parameter fitting
     hurst.py               # Hurst exponent (R/S analysis)
     consistency_score.py   # Consistency score (0-100)
-  tests/                   # 108 unit tests
+  tests/                   # 196 unit tests
   Dockerfile
   docker-compose.yml
 ```
+
+---
+
+## V7 Features
+
+### News Sentiment Filter
+Alpaca News API headlines scored via keyword matching. Returns a position-size multiplier:
+- **Halt keywords** (bankruptcy, fraud, SEC charges) → block trade entirely
+- **Strong negative** (misses, downgrade) → reduce size to 50%
+- **Neutral/positive** → full or boosted sizing
+- 30-minute cache per symbol, fail-safe returns neutral on API errors
+
+### LLM Signal Scoring (Optional)
+Claude Haiku evaluates signals with market context. Opt-in (`LLM_SCORING_ENABLED=true`), fail-open design:
+- 3-second timeout, $0.10/day cost cap
+- Returns 0.0–1.0 confidence score; signals below threshold are blocked
+- Score can scale position size for partial-conviction entries
+
+### Adaptive VIX-Aware Exits
+Four VIX regimes with dynamic exit parameters:
+- **Low vol** (VIX < 15): tighter targets, wider stops
+- **Normal** (15–20): balanced parameters
+- **High vol** (20–30): wider targets, tighter time stops
+- **Crisis** (30+): fastest exits, tightest stops
+
+### Walk-Forward Validation
+Weekly out-of-sample Sharpe check on each strategy. Auto-demotes strategies with OOS Sharpe < 0.3 by reducing allocation.
 
 ---
 
@@ -97,10 +137,12 @@ trading_bot/
 
 | Component | Description |
 |---|---|
-| **Volatility Targeting** | Scales position sizes so daily portfolio vol = 1% target. Blends VIX (30%), portfolio ATR (40%), rolling P&L std (30%) |
+| **Volatility Targeting** | Scales position sizes so daily portfolio vol = 1% target |
 | **Daily P&L Lock** | GAIN_LOCK at +1.5% (reduces to 30% sizing), LOSS_HALT at -1.0% (stops all new trades) |
 | **Beta Neutralization** | Monitors dollar-weighted portfolio beta, hedges with SPY when \|beta\| > 0.3 |
-| **Circuit Breaker** | Hard stop at -2.5% daily loss, closes all positions |
+| **Circuit Breaker** | Hard stop at -4% daily loss, closes all positions |
+| **VIX Risk Scaling** | Continuous VIX-based position size scaling (0.0–1.0 multiplier) |
+| **News Sentiment** | Soft size multiplier based on recent headlines |
 | **TWAP Execution** | Orders > $2,000 split into 5 time-weighted slices (60s apart) |
 
 ---
@@ -111,7 +153,7 @@ trading_bot/
 |---|---|---|
 | `ALPACA_LIVE` | `false` | Paper vs live trading |
 | `MAX_POSITIONS` | `12` | Maximum concurrent positions |
-| `MAX_DAILY_LOSS` | `-2.5%` | Circuit breaker threshold |
+| `DAILY_LOSS_HALT` | `-4%` | Circuit breaker threshold |
 | `SCAN_INTERVAL_SEC` | `120` | Seconds between strategy scans |
 | `RISK_PER_TRADE_PCT` | `0.8%` | Max risk per trade |
 | `VOL_TARGET_DAILY` | `1.0%` | Daily portfolio volatility target |
@@ -123,6 +165,11 @@ trading_bot/
 | `MR_HURST_MAX` | `0.52` | Maximum Hurst exponent for MR universe |
 | `PAIRS_ZSCORE_ENTRY` | `2.0` | Pairs z-score entry threshold |
 | `BETA_MAX_ABS` | `0.3` | Max absolute portfolio beta before hedging |
+| `ORB_ENABLED` | `true` | Enable ORB v2 strategy |
+| `NEWS_SENTIMENT_ENABLED` | `true` | Enable Alpaca news sentiment filter |
+| `LLM_SCORING_ENABLED` | `false` | Enable Claude Haiku signal scoring |
+| `ADAPTIVE_EXITS_ENABLED` | `true` | Enable VIX-aware adaptive exits |
+| `WALK_FORWARD_ENABLED` | `true` | Enable weekly walk-forward validation |
 | `TELEGRAM_ENABLED` | `false` | Enable Telegram trade alerts |
 | `WEBSOCKET_MONITORING` | `true` | Enable WebSocket position monitoring |
 
@@ -134,12 +181,12 @@ Access at `http://localhost:8080` when running. Features:
 
 - **Equity curve** — 60-day portfolio value chart
 - **Risk state** — Vol scalar, portfolio beta, P&L lock status, consistency score
-- **Strategy allocation** — MR 60% / PAIRS 25% / MICRO 15% with open trade counts
-- **Trade log** — Filterable by strategy with P&L breakdown
+- **Strategy allocation** — MR 50% / VWAP 20% / PAIRS 20% / ORB 5% / MICRO 5%
+- **Strategy health** — Per-strategy 7d/30d win rate, P&L, trade count diagnostics
+- **Trade log** — Filterable by strategy (StatMR, VWAP, KalmanPairs, ORB, MicroMom)
 - **Signal analysis** — Filter skip reasons and exit reason breakdown
-- **Shadow trades** — Paper trade tracking for strategy evaluation
 
-API endpoints: `/api/stats`, `/api/trades`, `/api/positions`, `/api/portfolio_history`, `/api/consistency`, `/api/risk-state`, `/api/signal_stats`, `/api/shadow_trades`, `/api/trade_analysis`
+API endpoints: `/api/stats`, `/api/trades`, `/api/positions`, `/api/portfolio_history`, `/api/consistency`, `/api/risk-state`, `/api/strategy_health`, `/api/filter_diagnostic`, `/api/signal_stats`, `/api/trade_analysis`
 
 ---
 
@@ -156,17 +203,17 @@ The bot runs in a container with automatic restarts and health checks. Set envir
 ## Testing
 
 ```bash
-# Run all V6 tests
-pytest tests/ --ignore=tests/test_risk.py --ignore=tests/test_strategies.py \
-  --ignore=tests/test_exit_manager.py --ignore=tests/test_news_filter.py -v
+# Run all tests
+pytest tests/ -v
 
 # Run specific test modules
 pytest tests/test_stat_mean_reversion.py -v
-pytest tests/test_kalman_pairs.py -v
-pytest tests/test_vol_targeting.py -v
+pytest tests/test_news_sentiment.py -v
+pytest tests/test_orb_v2.py -v
+pytest tests/test_adaptive_exit_manager.py -v
 ```
 
-108 tests covering all V6 strategies, risk modules, and analytics.
+196 tests covering all V7 strategies, risk modules, analytics, and new features.
 
 ---
 
@@ -179,7 +226,8 @@ pytest tests/test_vol_targeting.py -v
 | V3 | ML signal filter, short selling, dynamic allocation |
 | V4 | Sector rotation, pairs trading, MTF confirmation, news filter |
 | V5 | EMA scalping, shadow mode, advanced exits |
-| **V6** | **Complete rebuild: statistical mean reversion, volatility targeting, P&L locking, beta neutralization** |
+| V6 | Complete rebuild: statistical mean reversion, volatility targeting, P&L locking, beta neutralization |
+| **V7** | **5-strategy diversification (StatMR, VWAP v2, Pairs, ORB v2, MicroMom), news sentiment, LLM scoring, adaptive exits, walk-forward validation, strategy health dashboard** |
 
 ---
 

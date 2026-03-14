@@ -110,7 +110,7 @@ class TestCanOpenTrade:
                              VIX_HALT_THRESHOLD=40):
             rm = RiskManager(current_equity=100_000)
 
-            with patch("risk.get_vix_risk_scalar", return_value=0.0):
+            with patch("risk.risk_manager.get_vix_risk_scalar", return_value=0.0):
                 allowed, reason = rm.can_open_trade()
 
             assert allowed is False
@@ -192,7 +192,7 @@ class TestPositionSize:
                              SHORT_SIZE_MULTIPLIER=0.75):
             rm = RiskManager(current_equity=100_000)
 
-            with patch("risk.get_vix_risk_scalar", return_value=0.50):
+            with patch("risk.risk_manager.get_vix_risk_scalar", return_value=0.50):
                 qty = rm.calculate_position_size(
                     entry_price=100.0, stop_price=98.0, regime="BULLISH")
 
@@ -323,7 +323,7 @@ class TestVixRiskScalar:
                                              override_config):
         with override_config(VIX_RISK_SCALING_ENABLED=True,
                              VIX_HALT_THRESHOLD=40):
-            with patch("risk.get_vix_level", return_value=vix_level):
+            with patch("risk.risk_manager.get_vix_level", return_value=vix_level):
                 scalar = get_vix_risk_scalar()
                 assert scalar == expected_scalar, (
                     f"VIX={vix_level}: expected {expected_scalar}, got {scalar}"

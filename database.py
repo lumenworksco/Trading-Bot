@@ -814,3 +814,29 @@ def get_consistency_log(days: int = 30) -> list[dict]:
         (days,),
     ).fetchall()
     return [dict(r) for r in rows]
+
+
+# --- V7 additions ---
+
+def get_trades_by_strategy(strategy: str, days: int = 30) -> list[dict]:
+    """Get closed trades for a specific strategy within the last N days."""
+    from datetime import datetime, timedelta
+    cutoff = (datetime.now() - timedelta(days=days)).isoformat()
+    conn = _get_conn()
+    rows = conn.execute(
+        "SELECT * FROM trades WHERE strategy = ? AND exit_time > ? ORDER BY exit_time DESC",
+        (strategy, cutoff),
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def get_signals_by_strategy(strategy: str, days: int = 7) -> list[dict]:
+    """Get signal records for a specific strategy within the last N days."""
+    from datetime import datetime, timedelta
+    cutoff = (datetime.now() - timedelta(days=days)).isoformat()
+    conn = _get_conn()
+    rows = conn.execute(
+        "SELECT * FROM signals WHERE strategy = ? AND timestamp > ? ORDER BY timestamp DESC",
+        (strategy, cutoff),
+    ).fetchall()
+    return [dict(r) for r in rows]

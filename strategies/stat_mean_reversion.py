@@ -12,7 +12,7 @@ from datetime import datetime, time, timedelta
 
 import numpy as np
 import pandas as pd
-from alpaca.data.timeframe import TimeFrame
+from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
 
 import config
 from data import get_intraday_bars, get_daily_bars
@@ -48,25 +48,45 @@ class StatMeanReversion:
     def prepare_universe(self, symbols: list[str], now: datetime) -> list[str]:
         """Filter symbols for mean-reverting characteristics.
 
-        Called once at MR_UNIVERSE_PREP_TIME (9:00 AM).
-        Uses 20 days of daily close data for filtering.
+        Called at startup AND at MR_UNIVERSE_PREP_TIME (9:00 AM) each day.
+
+        V7 FIX: Uses intraday 2-min bars (5 days) for OU fitting when available,
+        falling back to daily bars. This fixes the half_life unit conversion bug
+        where daily bar half_life was multiplied by 24 (treating bar units as days),
+        producing values 24x too large for intraday trading.
 
         Steps:
-        1. Get 20 days of daily bars for each symbol
+        1. Get 5 days of 2-min intraday bars (or 30 days daily as fallback)
         2. Compute Hurst exponent — must be < MR_HURST_MAX (0.52)
-        3. Run ADF test — p-value must be < MR_ADF_PVALUE_MAX (0.05)
-           (approximated via OU regression; negative b coefficient implies stationarity)
-        4. Fit OU params — half-life must be between MR_HALFLIFE_MIN_HOURS (1) and MR_HALFLIFE_MAX_HOURS (48)
-        5. Rank by quality (low Hurst + high kappa) and take top MR_UNIVERSE_SIZE (40)
+        3. Fit OU params — half-life converted to hours using bar duration
+        4. Rank by quality (low Hurst + high kappa) and take top MR_UNIVERSE_SIZE (40)
         """
         candidates = []
 
         for symbol in symbols:
             try:
-                # Get recent daily bars
-                bars = get_daily_bars(symbol, days=30)
-                if bars is None or bars.empty or len(bars) < 20:
-                    continue
+                # Try intraday bars first (more accurate for intraday OU fitting)
+                bars = None
+                bar_duration_hours = 24  # default: daily
+
+                try:
+                    lookback = now - timedelta(days=5)
+                    intraday = get_intraday_bars(
+                        symbol, TimeFrame(2, TimeFrameUnit.Minute),
+                        start=lookback, end=now
+                    )
+                    if intraday is not None and not intraday.empty and len(intraday) >= 50:
+                        bars = intraday
+                        bar_duration_hours = 2 / 60  # 2-minute bars in hours
+                except Exception:
+                    pass
+
+                # Fallback to daily bars
+                if bars is None:
+                    bars = get_daily_bars(symbol, days=30)
+                    if bars is None or bars.empty or len(bars) < 20:
+                        continue
+                    bar_duration_hours = 24  # daily bars
 
                 close = bars["close"]
 
@@ -81,8 +101,8 @@ class StatMeanReversion:
                 if not ou:
                     continue
 
-                # 3. Half-life check (OU half_life is in bar units; daily bars -> days)
-                half_life_hours = ou['half_life'] * 24  # days -> hours
+                # 3. Half-life check (convert from bar units to hours)
+                half_life_hours = ou['half_life'] * bar_duration_hours
                 if not (config.MR_HALFLIFE_MIN_HOURS <= half_life_hours <= config.MR_HALFLIFE_MAX_HOURS):
                     continue
 

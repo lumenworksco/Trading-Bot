@@ -1,4 +1,4 @@
-"""V6: FastAPI web dashboard — portfolio history, trade log, signal analysis, risk state, consistency."""
+"""V7: FastAPI web dashboard — portfolio history, trade log, signal analysis, risk state, strategy health."""
 
 import logging
 import time as _time
@@ -12,7 +12,7 @@ import database
 
 logger = logging.getLogger(__name__)
 
-app = FastAPI(title="Velox V6 Dashboard", docs_url=None, redoc_url=None)
+app = FastAPI(title="Velox V7 Dashboard", docs_url=None, redoc_url=None)
 
 _start_time = _time.time()
 
@@ -133,6 +133,77 @@ def update_risk_state(pnl_lock_state: str = "NORMAL", vol_scalar: float = 1.0,
     })
 
 
+@app.get("/api/strategy_health")
+async def strategy_health():
+    """V7: Per-strategy health metrics for the last 7 and 30 days."""
+    import numpy as _np
+
+    def _compute_sharpe(pnls):
+        if len(pnls) < 5:
+            return None
+        arr = _np.array(pnls)
+        if arr.std() == 0:
+            return 0.0
+        return float(arr.mean() / arr.std() * _np.sqrt(252))
+
+    result = {}
+    for strategy in ['STAT_MR', 'VWAP', 'KALMAN_PAIRS', 'ORB', 'MICRO_MOM']:
+        try:
+            trades_7d = database.get_trades_by_strategy(strategy, days=7)
+            trades_30d = database.get_trades_by_strategy(strategy, days=30)
+            signals_7d = database.get_signals_by_strategy(strategy, days=7)
+        except Exception:
+            result[strategy] = {'status': 'error', 'trades_7d': 0}
+            continue
+
+        if not trades_30d:
+            result[strategy] = {'status': 'no_data', 'trades_7d': 0, 'trades_30d': 0}
+            continue
+
+        pnls_7d = [t.get('pnl_pct', 0) or 0 for t in trades_7d]
+        pnls_30d = [t.get('pnl_pct', 0) or 0 for t in trades_30d]
+        wins_7d = sum(1 for p in pnls_7d if p > 0)
+        wins_30d = sum(1 for p in pnls_30d if p > 0)
+        block_rate = (1 - len(trades_7d) / max(len(signals_7d), 1)) * 100 if signals_7d else 0
+
+        result[strategy] = {
+            'status': 'active',
+            'trades_7d': len(trades_7d),
+            'trades_30d': len(trades_30d),
+            'win_rate_7d': wins_7d / max(len(trades_7d), 1),
+            'win_rate_30d': wins_30d / max(len(trades_30d), 1),
+            'total_pnl_7d': sum(pnls_7d),
+            'total_pnl_30d': sum(pnls_30d),
+            'avg_win': float(_np.mean([p for p in pnls_30d if p > 0])) if any(p > 0 for p in pnls_30d) else 0,
+            'avg_loss': float(_np.mean([p for p in pnls_30d if p < 0])) if any(p < 0 for p in pnls_30d) else 0,
+            'signal_block_rate': block_rate,
+            'sharpe_30d': _compute_sharpe(pnls_30d),
+        }
+
+    return result
+
+
+@app.get("/api/filter_diagnostic")
+async def filter_diagnostic():
+    """V7: Breakdown of why signals are being blocked — critical for detecting over-filtering."""
+    try:
+        from datetime import timedelta
+        from_date = (datetime.now() - timedelta(days=7)).isoformat()
+        conn = database._get_conn()
+        c = conn.cursor()
+        c.execute("""
+            SELECT strategy, skip_reason, COUNT(*) as cnt
+            FROM signals
+            WHERE acted_on = 0 AND timestamp > ?
+            GROUP BY strategy, skip_reason
+            ORDER BY strategy, cnt DESC
+        """, (from_date,))
+        rows = [{'strategy': r[0], 'skip_reason': r[1], 'count': r[2]} for r in c.fetchall()]
+        return {'filter_breakdown': rows}
+    except Exception as e:
+        return {'filter_breakdown': [], 'error': str(e)}
+
+
 @app.get("/api/trade_analysis")
 async def trade_analysis(days: int = Query(7, ge=1, le=90)):
     """Return exit reason breakdown and filter block summary."""
@@ -178,7 +249,7 @@ tr:hover{background:#161b22}
 </style>
 </head>
 <body>
-<h1>VELOX V6 — Autonomous Algorithmic Trading System</h1>
+<h1>VELOX V7 — Autonomous Algorithmic Trading System</h1>
 
 <div class="grid" id="stats-grid"></div>
 
@@ -192,7 +263,9 @@ tr:hover{background:#161b22}
 <select id="stratFilter" onchange="loadTrades()">
 <option value="">All Strategies</option>
 <option value="STAT_MR">Mean Reversion</option>
+<option value="VWAP">VWAP</option>
 <option value="KALMAN_PAIRS">Pairs Trading</option>
+<option value="ORB">Opening Range Breakout</option>
 <option value="MICRO_MOM">Micro Momentum</option>
 <option value="BETA_HEDGE">Beta Hedge</option>
 </select>
@@ -218,7 +291,7 @@ tr:hover{background:#161b22}
 <div id="signal-stats"></div>
 </div>
 
-<div class="footer">Auto-refreshes every 30s | Velox V6</div>
+<div class="footer">Auto-refreshes every 30s | Velox V7</div>
 
 <script>
 let chart=null;
