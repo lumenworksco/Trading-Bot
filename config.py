@@ -362,6 +362,26 @@ ATR_TRAIL_ACTIVATION = 0.5  # Activate after 0.5x ATR in profit
 DATA_CACHE_ENABLED = True
 DATA_CACHE_MAX_SIZE = 500
 
+# --- V8: Portfolio Heat & Correlation Clustering ---
+PORTFOLIO_HEAT_ENABLED = True
+PORTFOLIO_HEAT_MAX = 0.60
+CLUSTER_CORRELATION_THRESHOLD = 0.70
+CLUSTER_MAX_HEAT = 0.20
+HEAT_CORRELATION_LOOKBACK = 20  # trading days
+
+# --- V8: ADX Trend Strength Filter ---
+ORB_ADX_FILTER_ENABLED = True
+ORB_ADX_MIN = 25  # Only take breakouts when ADX > 25
+ORB_ADX_PERIOD = 14
+VWAP_ADX_FILTER_ENABLED = True
+VWAP_ADX_MAX = 20  # Skip VWAP signals when ADX > 20 (strong trend)
+
+# --- V8: OBV Divergence ---
+OBV_DIVERGENCE_ENABLED = True
+OBV_CONFIDENCE_BOOST = 0.1
+OBV_CONFIDENCE_PENALTY = -0.1
+OBV_LOOKBACK = 20
+
 # --- Runtime-mutable strategy parameters (can be updated by optimizer) ---
 _runtime_params: dict = {}
 
