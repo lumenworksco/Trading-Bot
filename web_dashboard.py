@@ -13,7 +13,7 @@ from analytics.metrics import compute_sharpe as _shared_compute_sharpe
 
 logger = logging.getLogger(__name__)
 
-app = FastAPI(title="Velox V8 Dashboard", docs_url=None, redoc_url=None)
+app = FastAPI(title="Velox V9 Dashboard", docs_url=None, redoc_url=None)
 
 _start_time = _time.time()
 
@@ -34,7 +34,7 @@ async def health():
         "uptime_seconds": round(uptime_sec),
         "open_positions": open_count,
         "paper_mode": config.PAPER_MODE,
-        "version": "V8",
+        "version": "V9",
     }
 
 
@@ -246,7 +246,7 @@ async def dashboard():
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Velox V8 Dashboard</title>
+<title>Velox V9 Dashboard</title>
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
 <style>
 *{margin:0;padding:0;box-sizing:border-box}
@@ -270,7 +270,7 @@ tr:hover{background:#161b22}
 </style>
 </head>
 <body>
-<h1>VELOX V8 — Autonomous Algorithmic Trading System</h1>
+<h1>VELOX V9 — Autonomous Algorithmic Trading System</h1>
 
 <div class="grid" id="stats-grid"></div>
 
@@ -312,7 +312,7 @@ tr:hover{background:#161b22}
 <div id="signal-stats"></div>
 </div>
 
-<div class="footer">Auto-refreshes every 30s | Velox V8</div>
+<div class="footer">Auto-refreshes every 30s | Velox V9</div>
 
 <script>
 let chart=null;
@@ -440,6 +440,338 @@ setInterval(refresh,30000);
 </script>
 </body>
 </html>"""
+
+
+# ===================================================================
+# V9 shared state — populated by main.py each scan cycle
+# ===================================================================
+
+_v9_state = {
+    # HMM regime
+    "hmm_regime": "UNKNOWN",
+    "hmm_probabilities": {},
+    # Cross-asset
+    "cross_asset_bias": 0.0,
+    "cross_asset_signals": {},
+    # Portfolio heat
+    "portfolio_heat_pct": 0.0,
+    "portfolio_heat_cap": 0.60,
+    "cluster_heat": {},
+    # Alpha decay
+    "alpha_warnings": [],
+    "alpha_decay_stats": {},
+    # Adaptive allocation
+    "adaptive_weights": {},
+    # Signal pipeline
+    "signals_today": [],
+    # Overnight
+    "overnight_positions": [],
+    "overnight_count": 0,
+    # Execution quality
+    "execution_stats": {},
+    # System health
+    "system_health": {},
+    # Monte Carlo
+    "monte_carlo_var": None,
+    "monte_carlo_cvar": None,
+    # Daily P&L attribution
+    "pnl_attribution": {},
+    # Strategy detail cache
+    "strategy_details": {},
+}
+
+
+def update_v9_state(**kwargs):
+    """Called by main loop to update V9 state for the API."""
+    for key, value in kwargs.items():
+        if key in _v9_state:
+            _v9_state[key] = value
+
+
+# ===================================================================
+# V2 API Endpoints
+# ===================================================================
+
+@app.get("/api/v2/overview")
+async def v2_overview():
+    """Portfolio overview with V9 regime, cross-asset, heat, P&L attribution."""
+    result = {}
+    try:
+        result["regime"] = {
+            "state": _v9_state.get("hmm_regime", "UNKNOWN"),
+            "probabilities": _v9_state.get("hmm_probabilities", {}),
+        }
+    except Exception as e:
+        logger.warning(f"v2_overview regime failed: {e}")
+        result["regime"] = {"state": "UNKNOWN", "probabilities": {}, "error": str(e)}
+
+    try:
+        result["cross_asset"] = {
+            "bias": _v9_state.get("cross_asset_bias", 0.0),
+            "signals": _v9_state.get("cross_asset_signals", {}),
+        }
+    except Exception as e:
+        logger.warning(f"v2_overview cross_asset failed: {e}")
+        result["cross_asset"] = {"bias": 0.0, "signals": {}, "error": str(e)}
+
+    try:
+        result["portfolio_heat"] = {
+            "current_pct": _v9_state.get("portfolio_heat_pct", 0.0),
+            "cap_pct": _v9_state.get("portfolio_heat_cap", 0.60),
+        }
+    except Exception as e:
+        logger.warning(f"v2_overview heat failed: {e}")
+        result["portfolio_heat"] = {"current_pct": 0.0, "cap_pct": 0.60, "error": str(e)}
+
+    try:
+        result["daily_pnl"] = {
+            "day_pnl_pct": _v6_risk_state.get("day_pnl_pct", 0.0),
+            "pnl_lock_state": _v6_risk_state.get("pnl_lock_state", "NORMAL"),
+            "attribution": _v9_state.get("pnl_attribution", {}),
+        }
+    except Exception as e:
+        logger.warning(f"v2_overview pnl failed: {e}")
+        result["daily_pnl"] = {"day_pnl_pct": 0.0, "attribution": {}, "error": str(e)}
+
+    try:
+        result["adaptive_weights"] = _v9_state.get("adaptive_weights", {})
+    except Exception as e:
+        logger.warning(f"v2_overview weights failed: {e}")
+        result["adaptive_weights"] = {}
+
+    return result
+
+
+@app.get("/api/v2/strategy/{name}")
+async def v2_strategy(name: str):
+    """Per-strategy detail: alpha decay, trades, win rate, allocation, regime affinity."""
+    result = {"strategy": name}
+
+    # Alpha decay stats
+    try:
+        decay_stats = _v9_state.get("alpha_decay_stats", {})
+        result["alpha_decay"] = decay_stats.get(name, {})
+    except Exception as e:
+        logger.warning(f"v2_strategy alpha_decay failed for {name}: {e}")
+        result["alpha_decay"] = {"error": str(e)}
+
+    # Recent trades from DB
+    try:
+        trades = database.get_trades_by_strategy(name, days=7)
+        result["recent_trades"] = trades[:20] if trades else []
+        pnls = [t.get("pnl_pct", 0) or 0 for t in (trades or [])]
+        wins = sum(1 for p in pnls if p > 0)
+        result["win_rate_7d"] = wins / max(len(pnls), 1)
+        result["trade_count_7d"] = len(pnls)
+    except Exception as e:
+        logger.warning(f"v2_strategy trades failed for {name}: {e}")
+        result["recent_trades"] = []
+        result["win_rate_7d"] = 0.0
+        result["trade_count_7d"] = 0
+        result["trades_error"] = str(e)
+
+    # Current allocation weight
+    try:
+        weights = _v9_state.get("adaptive_weights", {})
+        result["allocation_weight"] = weights.get(name, config.STRATEGY_ALLOCATIONS.get(name, 0.0))
+    except Exception as e:
+        logger.warning(f"v2_strategy allocation failed for {name}: {e}")
+        result["allocation_weight"] = 0.0
+
+    # Regime affinity
+    try:
+        from analytics.hmm_regime import get_strategy_regime_affinity
+        regime = _v9_state.get("hmm_regime", "UNKNOWN")
+        result["regime_affinity"] = get_strategy_regime_affinity(name, regime)
+    except Exception as e:
+        logger.warning(f"v2_strategy regime_affinity failed for {name}: {e}")
+        result["regime_affinity"] = None
+
+    # Sortino / Sharpe
+    try:
+        trades_30d = database.get_trades_by_strategy(name, days=30)
+        pnls_30d = [t.get("pnl_pct", 0) or 0 for t in (trades_30d or [])]
+        result["sharpe_30d"] = _shared_compute_sharpe(pnls_30d) if len(pnls_30d) >= 5 else None
+        # Sortino: downside deviation
+        if len(pnls_30d) >= 5:
+            import numpy as _np
+            arr = _np.array(pnls_30d)
+            downside = arr[arr < 0]
+            dd = float(_np.std(downside)) if len(downside) > 1 else 0.001
+            result["sortino_30d"] = float(_np.mean(arr)) / dd if dd > 0 else None
+        else:
+            result["sortino_30d"] = None
+    except Exception as e:
+        logger.warning(f"v2_strategy sharpe/sortino failed for {name}: {e}")
+        result["sharpe_30d"] = None
+        result["sortino_30d"] = None
+
+    return result
+
+
+@app.get("/api/v2/signals/pipeline")
+async def v2_signals_pipeline():
+    """Full signal funnel: generated, risk decisions, ranking, rejections."""
+    result = {}
+    try:
+        result["signals_today"] = _v9_state.get("signals_today", [])
+    except Exception as e:
+        logger.warning(f"v2_signals_pipeline signals failed: {e}")
+        result["signals_today"] = []
+        result["error"] = str(e)
+
+    # Also pull from DB for today's signals
+    try:
+        today_str = datetime.now(config.ET).strftime("%Y-%m-%d")
+        db_signals = database.get_signals_by_date(today_str)
+        result["db_signals"] = db_signals if db_signals else []
+    except Exception as e:
+        logger.warning(f"v2_signals_pipeline db_signals failed: {e}")
+        result["db_signals"] = []
+
+    # Signal ranking info
+    try:
+        from analytics.signal_ranker import get_ranking_history
+        result["ranking_history"] = get_ranking_history()
+    except Exception:
+        result["ranking_history"] = []
+
+    # Rejection reasons
+    try:
+        skip_reasons = database.get_signal_skip_reasons(days=1)
+        result["rejection_reasons"] = skip_reasons if skip_reasons else {}
+    except Exception as e:
+        logger.warning(f"v2_signals_pipeline rejections failed: {e}")
+        result["rejection_reasons"] = {}
+
+    return result
+
+
+@app.get("/api/v2/risk/exposure")
+async def v2_risk_exposure():
+    """Portfolio risk exposure: heat, beta, VIX, overnight, Monte Carlo."""
+    result = {}
+
+    try:
+        result["portfolio_heat"] = {
+            "current_pct": _v9_state.get("portfolio_heat_pct", 0.0),
+            "cap_pct": _v9_state.get("portfolio_heat_cap", 0.60),
+            "cluster_heat": _v9_state.get("cluster_heat", {}),
+        }
+    except Exception as e:
+        logger.warning(f"v2_risk_exposure heat failed: {e}")
+        result["portfolio_heat"] = {"error": str(e)}
+
+    try:
+        result["beta_exposure"] = _v6_risk_state.get("portfolio_beta", 0.0)
+    except Exception as e:
+        result["beta_exposure"] = 0.0
+
+    try:
+        result["vix_regime"] = {}
+        from analytics.cross_asset import get_vix_level
+        result["vix_regime"]["vix_level"] = get_vix_level()
+    except Exception:
+        result["vix_regime"] = {"vix_level": None}
+
+    try:
+        result["overnight"] = {
+            "positions": _v9_state.get("overnight_positions", []),
+            "count": _v9_state.get("overnight_count", 0),
+        }
+    except Exception as e:
+        result["overnight"] = {"positions": [], "count": 0}
+
+    try:
+        result["cross_asset_bias"] = _v9_state.get("cross_asset_bias", 0.0)
+    except Exception:
+        result["cross_asset_bias"] = 0.0
+
+    try:
+        result["monte_carlo"] = {
+            "var": _v9_state.get("monte_carlo_var"),
+            "cvar": _v9_state.get("monte_carlo_cvar"),
+        }
+    except Exception:
+        result["monte_carlo"] = {"var": None, "cvar": None}
+
+    try:
+        result["daily_pnl_lock"] = _v6_risk_state.get("pnl_lock_state", "NORMAL")
+    except Exception:
+        result["daily_pnl_lock"] = "NORMAL"
+
+    return result
+
+
+@app.get("/api/v2/execution/quality")
+async def v2_execution_quality():
+    """Execution quality: slippage, fill rates, latency, cancel rate."""
+    result = {}
+    try:
+        exec_stats = _v9_state.get("execution_stats", {})
+        result.update(exec_stats)
+    except Exception as e:
+        logger.warning(f"v2_execution_quality state failed: {e}")
+        result["error"] = str(e)
+
+    # Try to get from execution analytics module
+    try:
+        from analytics.execution_analytics import get_execution_summary
+        summary = get_execution_summary()
+        if summary:
+            result["analytics_summary"] = summary
+    except Exception:
+        result["analytics_summary"] = {}
+
+    # Defaults for expected fields
+    result.setdefault("slippage_by_strategy", {})
+    result.setdefault("fill_rate", None)
+    result.setdefault("latency_p50_ms", None)
+    result.setdefault("latency_p95_ms", None)
+    result.setdefault("latency_p99_ms", None)
+    result.setdefault("cancel_rate", None)
+    result.setdefault("spread_at_execution", {})
+
+    return result
+
+
+@app.get("/api/v2/health")
+async def v2_health():
+    """System health: data feeds, API latency, cache, scan times, errors."""
+    result = {}
+
+    try:
+        uptime_sec = _time.time() - _start_time
+        result["uptime_seconds"] = round(uptime_sec)
+        result["version"] = "V9"
+        result["paper_mode"] = config.PAPER_MODE
+    except Exception as e:
+        result["uptime_seconds"] = 0
+        result["version"] = "V9"
+
+    try:
+        health_data = _v9_state.get("system_health", {})
+        result.update(health_data)
+    except Exception as e:
+        logger.warning(f"v2_health system_health failed: {e}")
+
+    # Defaults for expected fields
+    result.setdefault("data_feed_status", "unknown")
+    result.setdefault("api_latency_ms", None)
+    result.setdefault("cache_hit_rate", None)
+    result.setdefault("strategy_scan_times", {})
+    result.setdefault("last_error", None)
+    result.setdefault("last_warning", None)
+    result.setdefault("model_stale_dates", {})
+
+    # Try to get positions count
+    try:
+        positions = database.load_open_positions()
+        result["open_positions"] = len(positions)
+    except Exception:
+        result["open_positions"] = -1
+
+    return result
 
 
 def start_web_dashboard():

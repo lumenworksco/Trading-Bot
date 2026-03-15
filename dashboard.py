@@ -1,4 +1,4 @@
-"""Rich terminal dashboard V6 — Velox V6 strategy metrics, risk state, consistency score."""
+"""Rich terminal dashboard — strategy metrics, risk state, consistency score."""
 
 import logging
 from datetime import datetime
@@ -46,6 +46,13 @@ def build_dashboard(
     vol_scalar: float = 1.0,
     portfolio_beta: float = 0.0,
     consistency_score: float = 0.0,
+    # V9 kwargs
+    hmm_regime_state: str = "",
+    hmm_probabilities: dict | None = None,
+    cross_asset_bias: float | None = None,
+    portfolio_heat_pct: float | None = None,
+    alpha_warnings: list | None = None,
+    overnight_count: int = 0,
 ) -> Panel:
     """Build the full dashboard layout as a Rich Panel."""
 
@@ -70,7 +77,7 @@ def build_dashboard(
     )
 
     # Header
-    header = f"  VELOX V7 | {mode} MODE | Regime: {regime_text} | PnL Lock: {lock_text} | Up: {uptime}"
+    header = f"  VELOX V9 | {mode} MODE | Regime: {regime_text} | PnL Lock: {lock_text} | Up: {uptime}"
 
     # Portfolio section
     day_pnl_dollars = risk.day_pnl * risk.starting_equity if risk.starting_equity else 0
@@ -86,7 +93,7 @@ def build_dashboard(
         week_pct = analytics.get("week_pnl_pct", 0)
         portfolio_lines.append(f"  Week P&L: {format_pnl(week_pnl)} {format_pnl_pct(week_pct)}")
 
-    # --- V6: Risk State panel ---
+    # --- Risk State panel ---
     vol_color = "green" if 0.7 <= vol_scalar <= 1.3 else "yellow" if 0.5 <= vol_scalar <= 1.5 else "red"
     beta_color = "green" if abs(portfolio_beta) <= 0.3 else "yellow" if abs(portfolio_beta) <= 0.5 else "red"
     cs_color = "green" if consistency_score >= 70 else "yellow" if consistency_score >= 40 else "red"
@@ -98,7 +105,7 @@ def build_dashboard(
         f"  Consistency:      [{cs_color}]{consistency_score:.0f}/100[/{cs_color}]",
     ]
 
-    # --- V6: Strategy Allocation panel ---
+    # --- Strategy Allocation panel ---
     alloc_map = config.STRATEGY_ALLOCATIONS
     # Count trades per strategy
     strat_counts = {}
@@ -106,7 +113,7 @@ def build_dashboard(
         strat_counts[trade.strategy] = strat_counts.get(trade.strategy, 0) + 1
 
     alloc_lines = []
-    for strat_name, display_name in [("STAT_MR", "MR"), ("VWAP", "VWAP"), ("KALMAN_PAIRS", "PAIRS"), ("ORB", "ORB"), ("MICRO_MOM", "MICRO")]:
+    for strat_name, display_name in [("STAT_MR", "MR"), ("VWAP", "VWAP"), ("KALMAN_PAIRS", "PAIRS"), ("PEAD", "PEAD"), ("ORB", "ORB"), ("MICRO_MOM", "MICRO")]:
         weight = alloc_map.get(strat_name, 0)
         count = strat_counts.get(strat_name, 0)
         bar_len = int(weight * 30)
@@ -132,7 +139,7 @@ def build_dashboard(
         if trade.side == "sell":
             side_tag = " [magenta]SHORT[/magenta]"
 
-        # V6: strategy-specific display
+        # Strategy-specific display
         strat_display = trade.strategy
         extra = ""
         if trade.strategy == "STAT_MR":
@@ -148,6 +155,8 @@ def build_dashboard(
             strat_display = "[green]VWAP[/green]"
         elif trade.strategy == "ORB":
             strat_display = "[white]ORB[/white]"
+        elif trade.strategy == "PEAD":
+            strat_display = "[bright_cyan]PEAD[/bright_cyan]"
         elif trade.strategy == "BETA_HEDGE":
             strat_display = "[magenta]HEDGE[/magenta]"
 
@@ -205,7 +214,7 @@ def build_dashboard(
         recent_lines = ["  (no trades yet)"]
 
     # Feature flags
-    feat_parts = ["MR50%", "VWAP20%", "PAIRS20%", "ORB5%", "MICRO5%"]
+    feat_parts = ["MR40%", "VWAP20%", "PAIRS20%", "PEAD10%", "ORB5%", "MICRO5%"]
     if config.ALLOW_SHORT:
         feat_parts.append("Short")
     if config.TELEGRAM_ENABLED:
@@ -225,9 +234,40 @@ def build_dashboard(
         f"  Circuit breaker: {cb_text}"
     )
 
+    # --- V9 Summary Lines ---
+    v9_lines = []
+    if hmm_regime_state:
+        prob_display = ""
+        if hmm_probabilities:
+            top_prob = hmm_probabilities.get(hmm_regime_state, 0.0)
+            prob_display = f" [{top_prob * 100:.0f}%]"
+        regime_color_v9 = "green" if "BULL" in hmm_regime_state.upper() else "red" if "BEAR" in hmm_regime_state.upper() else "yellow"
+        v9_lines.append(f"  REGIME: [{regime_color_v9}]{hmm_regime_state}{prob_display}[/{regime_color_v9}]")
+
+    if cross_asset_bias is not None:
+        bias_label = "risk-on" if cross_asset_bias > 0 else "risk-off" if cross_asset_bias < 0 else "neutral"
+        bias_color = "green" if cross_asset_bias > 0 else "red" if cross_asset_bias < 0 else "yellow"
+        v9_lines.append(f"  CROSS: [{bias_color}]{cross_asset_bias:+.1f} {bias_label}[/{bias_color}]")
+
+    if portfolio_heat_pct is not None:
+        heat_cap = config.PORTFOLIO_HEAT_MAX * 100
+        heat_color = "green" if portfolio_heat_pct < heat_cap * 0.7 else "yellow" if portfolio_heat_pct < heat_cap else "red"
+        v9_lines.append(f"  HEAT: [{heat_color}]{portfolio_heat_pct:.0f}% / {heat_cap:.0f}% cap[/{heat_color}]")
+
+    if alpha_warnings:
+        for warn in alpha_warnings[:3]:
+            v9_lines.append(f"  [yellow]\u26a0 {warn}[/yellow]")
+
+    if overnight_count > 0:
+        v9_lines.append(f"  OVERNIGHT: {overnight_count} position{'s' if overnight_count != 1 else ''} held")
+
     # --- Assemble ---
     sep = f"{'---' * 23}"
     content = f"[bold]{header}[/bold]\n{sep}\n"
+
+    # V9 Summary
+    if v9_lines:
+        content += " V9 INTELLIGENCE\n" + "\n".join(v9_lines) + "\n" + sep + "\n"
 
     # Portfolio + Risk State
     content += " PORTFOLIO\n" + "\n".join(portfolio_lines) + "\n"
@@ -277,7 +317,7 @@ def build_dashboard(
 
     return Panel(
         content,
-        title="[bold cyan]VELOX V7 -- Autonomous Algorithmic Trading System[/bold cyan]",
+        title="[bold cyan]VELOX V9 -- Autonomous Algorithmic Trading System[/bold cyan]",
         border_style="cyan",
     )
 
@@ -325,6 +365,6 @@ def print_startup_info(info: dict):
         f"  Cash:    ${info['cash']:,.2f}\n"
         f"  Market:  {market}\n"
         f"  Next:    {info.get('next_open', 'N/A')}",
-        title="[bold green]VELOX V7 -- CONNECTION VERIFIED[/bold green]",
+        title="[bold green]VELOX V9 -- CONNECTION VERIFIED[/bold green]",
         border_style="green",
     ))

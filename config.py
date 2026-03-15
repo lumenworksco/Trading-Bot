@@ -461,13 +461,32 @@ WEBSOCKET_MONITORING = True
 WEBSOCKET_RECONNECT_SEC = 5
 
 # ============================================================
+# REPLAY & A/B TESTING
+# ============================================================
+
+REPLAY_ENABLED = True
+AB_TESTING_ENABLED = True
+REPLAY_DATA_RETENTION_DAYS = 90
+
+# ============================================================
 # PERSISTENCE & BACKTESTING
 # ============================================================
 
 STATE_FILE = "state.json"
 DB_FILE = "bot.db"
 LOG_FILE = "bot.log"
+AUDIT_LOG_FILE = "audit.log"
 STATE_SAVE_INTERVAL_SEC = 60
+
+# --- Watchdog & Reconciliation ---
+WATCHDOG_ENABLED = True
+WATCHDOG_CHECK_INTERVAL = 300        # 5 minutes
+RECONCILIATION_ENABLED = True
+RECONCILIATION_INTERVAL = 1800       # 30 minutes
+
+# --- Structured Audit Trail ---
+STRUCTURED_LOGGING_ENABLED = True
+AUDIT_TRAIL_RETENTION_DAYS = 365
 
 BACKTEST_SLIPPAGE = 0.0005         # 0.05% slippage per trade
 BACKTEST_COMMISSION = 0.0035       # $0.0035 per share
