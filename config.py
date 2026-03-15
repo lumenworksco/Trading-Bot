@@ -317,6 +317,13 @@ MONTE_CARLO_DELEVERAGE_PCT = 0.20 # Reduce VOL_TARGET by 20%
 # EXECUTION
 # ============================================================
 
+# --- Smart Order Routing ---
+SMART_ROUTING_ENABLED = True
+SPREAD_THRESHOLD_PCT = 0.0015     # Use limit if spread > 0.15%
+CHASE_AFTER_SECONDS = 60
+CHASE_CONVERT_MARKET_AFTER = 120
+ADAPTIVE_TWAP_ENABLED = True
+
 # --- Exit Management ---
 ADVANCED_EXITS_ENABLED = False     # Superseded by ADAPTIVE_EXITS_ENABLED
 SCALED_TP_ENABLED = False          # Superseded by adaptive exits
@@ -344,6 +351,14 @@ EXECUTION_SLIPPAGE_ALERT_PCT = 0.001
 # --- Scan Configuration ---
 SCAN_INTERVAL_SEC = 120
 CLOSE_UNKNOWN_POSITIONS = False    # Auto-close broker positions we didn't open
+
+# --- Overnight Holds ---
+OVERNIGHT_HOLD_ENABLED = True
+OVERNIGHT_MAX_POSITIONS = 4
+OVERNIGHT_MIN_PROFIT_PCT = 0.003    # Must be 0.3% in profit to hold
+OVERNIGHT_SIZE_REDUCTION = 0.40     # Sell 40% at close
+OVERNIGHT_GAP_STOP_PCT = 0.01      # Close if gaps against > 1%
+OVERNIGHT_ELIGIBLE_STRATEGIES = ["PEAD", "STAT_MR", "KALMAN_PAIRS"]
 
 # ============================================================
 # DATA & FILTERING
@@ -458,6 +473,13 @@ BACKTEST_SLIPPAGE = 0.0005         # 0.05% slippage per trade
 BACKTEST_COMMISSION = 0.0035       # $0.0035 per share
 BACKTEST_RISK_FREE_RATE = 0.045    # 4.5% annual
 BACKTEST_TOP_N = 20                # Run on top 20 most liquid symbols
+
+# --- Parameter Optimization ---
+PARAM_OPTIMIZER_ENABLED = True
+PARAM_OPTIMIZER_DAY = "sunday"
+PARAM_OPTIMIZER_TRIALS = 100
+PARAM_OPTIMIZER_MIN_IMPROVEMENT = 0.15   # 15% Sortino improvement required
+PARAM_OPTIMIZER_APPLY_AUTO = False       # Manual approval by default
 
 # ============================================================
 # LEGACY (backward-compat for archived strategies)
