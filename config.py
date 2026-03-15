@@ -213,6 +213,17 @@ MICRO_BETA_TABLE = {
     'LYFT': 1.5, 'UBER': 1.3, 'ABNB': 1.4, 'DASH': 1.3,
 }
 
+# --- Post-Earnings Announcement Drift ---
+PEAD_ENABLED = True
+PEAD_MIN_SURPRISE_PCT = 5.0
+PEAD_MIN_VOLUME_RATIO = 2.0
+PEAD_HOLD_DAYS_MIN = 10
+PEAD_HOLD_DAYS_MAX = 20
+PEAD_TAKE_PROFIT = 0.05
+PEAD_STOP_LOSS = 0.03
+PEAD_MAX_POSITIONS = 5
+PEAD_POSITION_SIZE_PCT = 0.02
+
 # ============================================================
 # RISK MANAGEMENT
 # ============================================================
@@ -373,6 +384,12 @@ OBV_CONFIDENCE_BOOST = 0.1
 OBV_CONFIDENCE_PENALTY = -0.1
 OBV_LOOKBACK = 20
 
+# --- Intraday Seasonality ---
+INTRADAY_SEASONALITY_ENABLED = True
+SEASONALITY_OPEN_AUCTION_BLOCK = True   # Skip first 15 min entirely (wide spreads)
+SEASONALITY_ADAPTIVE_LEARNING = True    # Learn from own trade history
+SEASONALITY_LEARNING_LOOKBACK = 60      # trading days
+
 # --- Cross-Asset Signals ---
 CROSS_ASSET_ENABLED = True
 CROSS_ASSET_UPDATE_INTERVAL = 900   # 15 minutes
@@ -388,6 +405,13 @@ DATA_QUALITY_MIN_BARS = 50
 # --- Data Caching ---
 DATA_CACHE_ENABLED = True
 DATA_CACHE_MAX_SIZE = 500
+
+# --- Signal Ranking & Alpha Decay ---
+SIGNAL_RANKING_ENABLED = True
+ALPHA_DECAY_ENABLED = True
+ALPHA_DECAY_CRITICAL_SHARPE = 0.3
+ALPHA_DECAY_WARNING_SHARPE = 0.5
+ALPHA_DECAY_AUTO_DEMOTE = True
 
 # --- LLM Signal Scoring ---
 LLM_SCORING_ENABLED    = os.getenv('LLM_SCORING_ENABLED', 'false') == 'true'
