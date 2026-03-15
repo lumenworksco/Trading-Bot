@@ -1,10 +1,11 @@
-"""Velox V8 — Autonomous Algorithmic Trading System.
+"""Velox V9 — Autonomous Algorithmic Trading System.
 
-Five-strategy portfolio with volatility-targeted sizing, Kelly criterion,
-daily P&L locks, beta neutralization, news sentiment, ATR trailing stops,
-portfolio heat tracking, and adaptive exits.
+Six-strategy portfolio with HMM regime detection, adaptive allocation,
+cross-asset signals, signal ranking, intraday seasonality, volatility-targeted
+sizing, Kelly criterion, daily P&L locks, beta neutralization, smart execution,
+overnight holds, parameter optimization, and operational hardening.
 
-Strategies: StatMR (50%), VWAP (20%), KalmanPairs (20%), ORB (5%), MicroMom (5%).
+Strategies: StatMR (40%), VWAP (20%), KalmanPairs (20%), PEAD (10%), ORB (5%), MicroMom (5%).
 """
 
 import argparse
@@ -88,6 +89,60 @@ try:
     from walk_forward import WalkForwardValidator
 except ImportError:
     WalkForwardValidator = None
+
+# --- V9 module imports (all fail-open) ---
+try:
+    from strategies.pead import PEADStrategy
+except ImportError:
+    PEADStrategy = None
+
+try:
+    from strategies.overnight import OvernightManager
+except ImportError:
+    OvernightManager = None
+
+try:
+    from analytics.cross_asset import CrossAssetMonitor
+except ImportError:
+    CrossAssetMonitor = None
+
+try:
+    from analytics.signal_ranker import SignalRanker
+except ImportError:
+    SignalRanker = None
+
+try:
+    from analytics.alpha_decay import AlphaDecayMonitor
+except ImportError:
+    AlphaDecayMonitor = None
+
+try:
+    from analytics.intraday_seasonality import IntradaySeasonality
+except ImportError:
+    IntradaySeasonality = None
+
+try:
+    from risk.adaptive_allocation import AdaptiveAllocator
+except ImportError:
+    AdaptiveAllocator = None
+
+try:
+    from analytics.param_optimizer import BayesianOptimizer
+except ImportError:
+    BayesianOptimizer = None
+
+try:
+    from watchdog import Watchdog, PositionReconciler, AuditTrail
+except ImportError:
+    Watchdog = None
+    PositionReconciler = None
+    AuditTrail = None
+
+try:
+    from smart_routing import SmartOrderRouter, FillMonitor
+except ImportError:
+    SmartOrderRouter = None
+    FillMonitor = None
 
 # --- Logging setup ---
 _file_handler = logging.FileHandler(config.LOG_FILE)
@@ -441,8 +496,30 @@ def _process_single_signal(
         except Exception:
             regime_mult = 1.0
 
-    # Apply news + LLM + regime multipliers
-    qty = int(qty * news_mult * llm_mult * regime_mult)
+    # V9: Intraday seasonality multiplier (fail-open: 1.0)
+    seasonality_mult = 1.0
+    if getattr(config, "INTRADAY_SEASONALITY_ENABLED", False) and IntradaySeasonality:
+        try:
+            _seasonality = IntradaySeasonality()
+            seasonality_mult = _seasonality.get_window_score(signal.strategy, now)
+        except Exception:
+            seasonality_mult = 1.0
+
+    # V9: Cross-asset bias multiplier (fail-open: 1.0)
+    cross_asset_mult = 1.0
+    if getattr(config, "CROSS_ASSET_ENABLED", False) and hasattr(_process_single_signal, '_cross_asset_monitor'):
+        try:
+            monitor = _process_single_signal._cross_asset_monitor
+            if monitor:
+                bias = monitor.get_equity_bias()
+                # Reduce sizing if flight-to-safety detected
+                if bias < -0.5:
+                    cross_asset_mult = getattr(config, "CROSS_ASSET_FLIGHT_REDUCTION", 0.30)
+        except Exception:
+            cross_asset_mult = 1.0
+
+    # Apply news + LLM + regime + seasonality + cross-asset multipliers
+    qty = int(qty * news_mult * llm_mult * regime_mult * seasonality_mult * cross_asset_mult)
 
     if qty <= 0:
         skip_reason = "position_size_zero"
@@ -607,7 +684,7 @@ def _get_current_prices(open_trades: dict) -> dict[str, float]:
 
 def main():
     """Main entry point."""
-    parser = argparse.ArgumentParser(description="Velox V8 Trading Bot")
+    parser = argparse.ArgumentParser(description="Velox V9 Trading Bot")
     parser.add_argument("--backtest", action="store_true", help="Run backtesting engine")
     parser.add_argument("--walkforward", action="store_true", help="Run walk-forward test")
     parser.add_argument("--live", action="store_true", help="Alias for ALPACA_LIVE=true")
@@ -631,7 +708,7 @@ def main():
         walk_forward_test()
         return
 
-    console.print("[bold cyan]Starting Velox V8 Trading Bot...[/bold cyan]\n")
+    console.print("[bold cyan]Starting Velox V9 Trading Bot...[/bold cyan]\n")
 
     # Initialize database
     database.init_db()
@@ -672,10 +749,97 @@ def main():
     adaptive_exits = AdaptiveExitManager() if AdaptiveExitManager and config.ADAPTIVE_EXITS_ENABLED else None
     walk_forward = WalkForwardValidator() if WalkForwardValidator and config.WALK_FORWARD_ENABLED else None
 
-    # Regime detector (kept)
+    # Regime detector
     regime_detector = MarketRegime()
 
-    # Risk manager (kept)
+    # V9 modules (all fail-open)
+    pead_strategy = None
+    if config.PEAD_ENABLED and PEADStrategy:
+        try:
+            pead_strategy = PEADStrategy()
+            logger.info("PEAD strategy enabled")
+        except Exception as e:
+            logger.warning(f"PEAD init failed: {e}")
+
+    overnight_manager = None
+    if config.OVERNIGHT_HOLD_ENABLED and OvernightManager:
+        try:
+            overnight_manager = OvernightManager()
+            logger.info("Overnight hold manager enabled")
+        except Exception as e:
+            logger.warning(f"Overnight manager init failed: {e}")
+
+    cross_asset_monitor = None
+    if config.CROSS_ASSET_ENABLED and CrossAssetMonitor:
+        try:
+            cross_asset_monitor = CrossAssetMonitor()
+            # Make accessible to _process_single_signal
+            _process_single_signal._cross_asset_monitor = cross_asset_monitor
+            logger.info("Cross-asset monitor enabled")
+        except Exception as e:
+            logger.warning(f"Cross-asset monitor init failed: {e}")
+
+    signal_ranker = None
+    if config.SIGNAL_RANKING_ENABLED and SignalRanker:
+        try:
+            signal_ranker = SignalRanker()
+            logger.info("Signal ranker enabled")
+        except Exception as e:
+            logger.warning(f"Signal ranker init failed: {e}")
+
+    alpha_decay_monitor = None
+    if config.ALPHA_DECAY_ENABLED and AlphaDecayMonitor:
+        try:
+            alpha_decay_monitor = AlphaDecayMonitor()
+            logger.info("Alpha decay monitor enabled")
+        except Exception as e:
+            logger.warning(f"Alpha decay monitor init failed: {e}")
+
+    adaptive_allocator = None
+    if config.ADAPTIVE_ALLOCATION_ENABLED and AdaptiveAllocator:
+        try:
+            adaptive_allocator = AdaptiveAllocator()
+            logger.info("Adaptive allocator enabled")
+        except Exception as e:
+            logger.warning(f"Adaptive allocator init failed: {e}")
+
+    param_optimizer = None
+    if config.PARAM_OPTIMIZER_ENABLED and BayesianOptimizer:
+        try:
+            param_optimizer = BayesianOptimizer()
+            logger.info("Parameter optimizer enabled")
+        except Exception as e:
+            logger.warning(f"Parameter optimizer init failed: {e}")
+
+    watchdog = None
+    if config.WATCHDOG_ENABLED and Watchdog:
+        try:
+            watchdog = Watchdog()
+            logger.info("Watchdog enabled")
+        except Exception as e:
+            logger.warning(f"Watchdog init failed: {e}")
+
+    reconciler = None
+    if getattr(config, "RECONCILIATION_ENABLED", False) and PositionReconciler:
+        try:
+            reconciler = PositionReconciler()
+            logger.info("Position reconciler enabled")
+        except Exception as e:
+            logger.warning(f"Position reconciler init failed: {e}")
+
+    audit_trail = None
+    if config.STRUCTURED_LOGGING_ENABLED and AuditTrail:
+        try:
+            audit_trail = AuditTrail()
+            logger.info("Structured audit trail enabled")
+        except Exception as e:
+            logger.warning(f"Audit trail init failed: {e}")
+
+    last_cross_asset_update = now_et()
+    last_watchdog_check = now_et()
+    last_reconciliation = now_et()
+
+    # Risk manager
     risk = RiskManager()
     risk.reset_daily(info["equity"], info["cash"])
     risk.load_from_db()
@@ -742,7 +906,7 @@ def main():
         features.append("WS")
 
     features_str = ", ".join(features)
-    console.print(f"\n[bold green]Velox V8 is running. Press Ctrl+C to stop.[/bold green]")
+    console.print(f"\n[bold green]Velox V9 is running. Press Ctrl+C to stop.[/bold green]")
     console.print(f"[dim]Strategies: STAT_MR + KALMAN_PAIRS + MICRO_MOM[/dim]")
     console.print(f"[dim]Features: {features_str}[/dim]\n")
 
@@ -828,6 +992,17 @@ def main():
                         news_sentiment.clear_daily_cache()
                     if llm_scorer:
                         llm_scorer.reset_daily()
+                    # V9 daily resets
+                    if pead_strategy:
+                        try:
+                            pead_strategy.reset_daily()
+                        except Exception:
+                            pass
+                    if overnight_manager:
+                        try:
+                            overnight_manager.reset_daily()
+                        except Exception:
+                            pass
                     universe_prepared_today = False
 
                     try:
@@ -857,8 +1032,17 @@ def main():
                     except Exception as e:
                         logger.error(f"Weekly pair selection failed: {e}")
 
+                    # V9: Parameter optimization (weekly, Sunday)
+                    if param_optimizer:
+                        try:
+                            logger.info("Sunday: running parameter optimization...")
+                            opt_results = param_optimizer.optimize_all()
+                            for strat, result in opt_results.items():
+                                logger.info(f"Optimizer {strat}: improved={result.get('improved', False)}")
+                        except Exception as e:
+                            logger.error(f"Parameter optimization failed: {e}")
+
                     # Walk-forward validation (weekly)
-                    if walk_forward:
                         try:
                             logger.info("Sunday: running walk-forward validation...")
                             wf_results = walk_forward.run_weekly_validation()
@@ -970,6 +1154,22 @@ def main():
                         except Exception as e:
                             logger.error(f"MicroMom scan failed: {e}")
 
+                        # V9: PEAD scan (daily at 9 AM — handled internally)
+                        if pead_strategy:
+                            try:
+                                pead_signals = pead_strategy.scan(current)
+                                signals.extend(pead_signals)
+                            except Exception as e:
+                                logger.error(f"PEAD scan failed: {e}")
+
+                        # V9: Signal ranking (sort by expected value)
+                        if signal_ranker and signals:
+                            try:
+                                ranked = signal_ranker.rank(signals, regime=regime)
+                                signals = ranked
+                            except Exception:
+                                pass  # Keep original order on failure
+
                         # 4. Process signals
                         if signals:
                             process_signals(
@@ -1035,8 +1235,58 @@ def main():
                                 except Exception as e:
                                     logger.error(f"Beta neutralization failed: {e}")
 
+                        # V9: PEAD exit checks
+                        if pead_strategy:
+                            try:
+                                pead_exits = pead_strategy.check_exits(risk.open_trades, current)
+                                if pead_exits:
+                                    _handle_strategy_exits(pead_exits, risk, current, ws_monitor)
+                            except Exception as e:
+                                logger.error(f"PEAD exit check failed: {e}")
+
+                        # V9: Cross-asset monitor update (every 15 min)
+                        if cross_asset_monitor:
+                            if (current - last_cross_asset_update).total_seconds() >= config.CROSS_ASSET_UPDATE_INTERVAL:
+                                try:
+                                    cross_asset_monitor.update()
+                                    last_cross_asset_update = current
+                                except Exception as e:
+                                    logger.error(f"Cross-asset update failed: {e}")
+
+                        # V9: Watchdog health check
+                        if watchdog:
+                            if (current - last_watchdog_check).total_seconds() >= config.WATCHDOG_CHECK_INTERVAL:
+                                try:
+                                    health = watchdog.check_health()
+                                    if not health.overall_healthy:
+                                        for issue in health.issues:
+                                            watchdog.recover(issue)
+                                    last_watchdog_check = current
+                                except Exception as e:
+                                    logger.error(f"Watchdog check failed: {e}")
+
+                        # V9: Position reconciliation (every 30 min)
+                        if reconciler:
+                            if (current - last_reconciliation).total_seconds() >= config.RECONCILIATION_INTERVAL:
+                                try:
+                                    reconciler.reconcile()
+                                    last_reconciliation = current
+                                except Exception as e:
+                                    logger.error(f"Reconciliation failed: {e}")
+
                         # Check shadow exits
                         check_shadow_exits(current)
+
+                    # V9: Overnight hold selection at 3:45 PM
+                    if overnight_manager and current_time >= config.ORB_EXIT_TIME:
+                        try:
+                            holds = overnight_manager.select_overnight_holds(
+                                risk.open_trades, regime
+                            )
+                            if holds:
+                                logger.info(f"Overnight holds selected: {[h.symbol for h in holds]}")
+                        except Exception as e:
+                            logger.error(f"Overnight hold selection failed: {e}")
 
                     # EOD close for day-hold positions at ORB_EXIT_TIME
                     if current_time >= config.ORB_EXIT_TIME:
@@ -1126,6 +1376,32 @@ def main():
                     except Exception as e:
                         logger.error(f"Consistency score computation failed: {e}")
 
+                    # V9: Alpha decay check at EOD
+                    if alpha_decay_monitor:
+                        try:
+                            report = alpha_decay_monitor.get_strategy_health_report()
+                            for strat, health in report.items():
+                                status = health.get("status", "unknown")
+                                if status == "critical":
+                                    logger.warning(f"Alpha decay CRITICAL: {strat} — consider demoting")
+                                elif status == "warning":
+                                    logger.info(f"Alpha decay warning: {strat} — Sharpe declining")
+                        except Exception as e:
+                            logger.error(f"Alpha decay check failed: {e}")
+
+                    # V9: Adaptive allocation rebalance at EOD
+                    if adaptive_allocator:
+                        try:
+                            new_weights = adaptive_allocator.compute_weights(
+                                regime=regime,
+                                regime_detector=regime_detector,
+                            )
+                            if new_weights:
+                                vol_engine.set_adaptive_weights(new_weights)
+                                logger.info(f"Adaptive weights updated: {new_weights}")
+                        except Exception as e:
+                            logger.error(f"Adaptive allocation failed: {e}")
+
                     eod_summary_printed = True
 
                 # -------------------------------------------------------
@@ -1177,6 +1453,49 @@ def main():
                 # -------------------------------------------------------
                 # Update dashboard
                 # -------------------------------------------------------
+                # V9: Update web dashboard shared state
+                if config.WEB_DASHBOARD_ENABLED:
+                    try:
+                        from web_dashboard import update_v9_state
+                        v9_update = {}
+                        if regime_detector and hasattr(regime_detector, 'hmm_regime'):
+                            v9_update['hmm_regime'] = str(regime_detector.hmm_regime or "UNKNOWN")
+                            v9_update['hmm_probabilities'] = getattr(regime_detector, 'hmm_probabilities', {})
+                        if cross_asset_monitor:
+                            v9_update['cross_asset_bias'] = cross_asset_monitor.get_equity_bias()
+                            try:
+                                v9_update['cross_asset_signals'] = cross_asset_monitor.compute_signals()
+                            except Exception:
+                                pass
+                        if overnight_manager:
+                            v9_update['overnight_count'] = len(overnight_manager.get_overnight_positions())
+                        if adaptive_allocator and hasattr(vol_engine, '_adaptive_weights'):
+                            v9_update['adaptive_weights'] = getattr(vol_engine, '_adaptive_weights', {})
+                        update_v9_state(**v9_update)
+                    except Exception:
+                        pass  # Web dashboard update is non-critical
+
+                # Build V9 dashboard kwargs
+                _v9_dash = {}
+                try:
+                    if regime_detector and hasattr(regime_detector, 'hmm_regime'):
+                        _v9_dash['hmm_regime_state'] = str(regime_detector.hmm_regime or "")
+                        _v9_dash['hmm_probabilities'] = getattr(regime_detector, 'hmm_probabilities', None)
+                    if cross_asset_monitor:
+                        _v9_dash['cross_asset_bias'] = cross_asset_monitor.get_equity_bias()
+                    if overnight_manager:
+                        _v9_dash['overnight_count'] = len(overnight_manager.get_overnight_positions())
+                    if alpha_decay_monitor:
+                        try:
+                            report = alpha_decay_monitor.get_strategy_health_report()
+                            warnings = [f"{s}: {d.get('status','')}" for s, d in report.items()
+                                       if d.get('status') in ('warning', 'critical')]
+                            _v9_dash['alpha_warnings'] = warnings
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
+
                 live.update(
                     build_dashboard(
                         risk, regime, start_time, current, last_scan,
@@ -1185,6 +1504,7 @@ def main():
                         vol_scalar=vol_engine.last_scalar,
                         portfolio_beta=beta_neutral.portfolio_beta,
                         consistency_score=latest_consistency_score,
+                        **_v9_dash,
                     )
                 )
 
@@ -1562,7 +1882,7 @@ async def async_main():
     import asyncio as _asyncio
     from supervisor import TaskSupervisor
 
-    console.print("[bold cyan]Starting Velox V8 Trading Bot (ASYNC MODE)...[/bold cyan]\n")
+    console.print("[bold cyan]Starting Velox V9 Trading Bot (ASYNC MODE)...[/bold cyan]\n")
 
     # Initialize database
     database.init_db()
@@ -1622,7 +1942,7 @@ async def async_main():
     start_time = now_et()
     logging.getLogger().removeHandler(_stream_handler)
 
-    console.print(f"\n[bold green]Velox V8 (ASYNC) is running. Press Ctrl+C to stop.[/bold green]\n")
+    console.print(f"\n[bold green]Velox V9 (ASYNC) is running. Press Ctrl+C to stop.[/bold green]\n")
 
     supervisor = TaskSupervisor()
 
@@ -1698,7 +2018,7 @@ async def async_main():
 
 def run_diagnostic():
     """Run one diagnostic scan cycle and print what's blocking trades."""
-    print("\n=== VELOX V8 SIGNAL DIAGNOSTIC MODE ===\n")
+    print("\n=== VELOX V9 SIGNAL DIAGNOSTIC MODE ===\n")
     print("Initializing strategies and filters...\n")
 
     from earnings import has_earnings_soon, load_earnings_cache
@@ -1835,7 +2155,7 @@ def run_diagnostic():
 if __name__ == "__main__":
     import argparse as _argparse
 
-    _parser = _argparse.ArgumentParser(description="Velox V8 Trading Bot")
+    _parser = _argparse.ArgumentParser(description="Velox V9 Trading Bot")
     _parser.add_argument("--diagnose", action="store_true", help="Run one diagnostic scan cycle (read-only)")
     _args = _parser.parse_args()
 
