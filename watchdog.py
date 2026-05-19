@@ -412,6 +412,16 @@ class PositionReconciler:
                     logger.debug(
                         f"RECONCILER: risk.cancel_trade failed for {symbol}: {_e}"
                     )
+                # Block re-adoption of a just-cancelled phantom for the
+                # cooldown window so sync_positions_with_broker() doesn't
+                # immediately re-adopt it back into a phantom loop (PFE 24x).
+                try:
+                    from engine.broker_sync import mark_symbol_close_attempted
+                    mark_symbol_close_attempted(symbol)
+                except Exception as _e:
+                    logger.debug(
+                        f"RECONCILER: re-adopt cooldown mark failed for {symbol}: {_e}"
+                    )
                 self._remove_from_db(symbol)
 
             elif at_broker and not in_db:

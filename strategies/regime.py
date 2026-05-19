@@ -177,25 +177,22 @@ class MarketRegime:
             return legacy
 
         except Exception as e:
-            logger.warning(f"HMM prediction failed: {e}")
+            from engine.logging_config import log_throttled
+            log_throttled(logger, logging.WARNING, "hmm_prediction_failed",
+                          f"HMM prediction failed: {e}")
             return None
 
     def _update_ema(self, now: datetime) -> str:
         """Legacy EMA20 slope regime detection."""
         try:
             df = get_daily_bars("SPY", days=config.REGIME_EMA_PERIOD + 5)
-            if df.empty or len(df) < config.REGIME_EMA_PERIOD:
-                # V10 BUG-018: Default to UNKNOWN (conservative) instead of BULLISH
-                logger.warning("Not enough SPY data for regime check, defaulting to UNKNOWN")
-                self.regime = "UNKNOWN"
-                self.last_check = now
-                return self.regime
+            if df is None or df.empty or len(df) < config.REGIME_EMA_PERIOD:
+                # Insufficient SPY data — transient feed gap or network outage.
+                return self._fallback_regime("Not enough SPY data for regime check")
 
             ema = ta.ema(df["close"], length=config.REGIME_EMA_PERIOD)
             if ema is None or ema.empty:
-                self.regime = "UNKNOWN"
-                self.last_check = now
-                return self.regime
+                return self._fallback_regime("EMA computation returned no data")
 
             self.spy_price = df["close"].iloc[-1]
             self.spy_ema = ema.iloc[-1]
@@ -205,9 +202,29 @@ class MarketRegime:
             logger.info(f"Market regime (EMA): {self.regime} (SPY={self.spy_price:.2f}, EMA={self.spy_ema:.2f})")
 
         except Exception as e:
-            logger.error(f"Regime check failed: {e}")
-            # V10: Keep UNKNOWN on exception (don't default to BULLISH)
+            from engine.logging_config import log_throttled
+            log_throttled(logger, logging.ERROR, "regime_check_failed",
+                          f"Regime check failed: {e}")
+            # Keep last-known regime on exception (don't default to BULLISH)
 
+        return self.regime
+
+    def _fallback_regime(self, reason: str) -> str:
+        """Return the last-known regime when fresh SPY data is unavailable.
+
+        A stale-but-real regime is a far better estimate than UNKNOWN, which
+        forces every regime-aware strategy into conservative mode (observed
+        2026-04: regime wiped to UNKNOWN 110x during feed gaps). Falls back to
+        UNKNOWN only on a genuine cold start. Deliberately does NOT advance
+        last_check, so the next cycle retries the fetch promptly.
+        """
+        if self.regime and self.regime != "UNKNOWN":
+            logger.warning("%s — keeping last-known regime %s (stale)",
+                           reason, self.regime)
+        else:
+            logger.warning("%s and no prior regime — defaulting to UNKNOWN",
+                           reason)
+            self.regime = "UNKNOWN"
         return self.regime
 
     def is_spy_positive_today(self) -> bool:

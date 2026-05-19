@@ -21,6 +21,7 @@ Usage:
 """
 
 import os
+import time
 import logging
 from logging.handlers import RotatingFileHandler
 import sys
@@ -195,3 +196,35 @@ def bind_trade_context(symbol: str, strategy: str, side: str = "", qty: int = 0)
 def clear_trade_context():
     """Clear trade-specific context."""
     structlog.contextvars.unbind_contextvars("symbol", "strategy", "side", "qty")
+
+
+# ---------------------------------------------------------------------------
+# Throttled logging — collapse repeated identical errors
+# ---------------------------------------------------------------------------
+
+_throttle_state: dict[str, tuple[float, int]] = {}
+_throttle_lock = threading.Lock()
+
+
+def log_throttled(logger_obj, level: int, key: str, message: str,
+                  interval_sec: float = 300.0) -> None:
+    """Emit `message` at most once per `interval_sec` for a given `key`.
+
+    Collapses storms of identical errors — e.g. a DNS outage that otherwise
+    floods the log with hundreds of identical lines (observed 2026-04:
+    ~800 lines from a single outage). When the throttle window reopens, the
+    next emission appends a count of how many were suppressed meanwhile.
+    """
+    now = time.time()
+    with _throttle_lock:
+        last_ts, suppressed = _throttle_state.get(key, (0.0, 0))
+        if now - last_ts < interval_sec:
+            _throttle_state[key] = (last_ts, suppressed + 1)
+            return
+        _throttle_state[key] = (now, 0)
+    if suppressed:
+        message = f"{message} [+{suppressed} more suppressed in last {interval_sec:.0f}s]"
+    try:
+        logger_obj.log(level, message)
+    except Exception:
+        pass

@@ -361,7 +361,34 @@ import os as _os
 _log_dir = _os.path.dirname(config.LOG_FILE) or "."
 _os.makedirs(_log_dir, exist_ok=True)
 
-_file_handler = RotatingFileHandler(
+
+class ResilientRotatingFileHandler(RotatingFileHandler):
+    """RotatingFileHandler that self-heals after transient filesystem errors.
+
+    A bind-mounted log file can raise OSError (e.g. Errno 5 EIO) from
+    stream.tell()/write() if the underlying Docker mount hiccups. The stdlib
+    handler has no recovery path, so one failure turns every subsequent log
+    call into a traceback (observed 2026-05-07: ~6k tracebacks, 11 days of
+    lost logs). On any handler error this closes and reopens the stream
+    instead of spamming, so logging resumes once the filesystem recovers.
+    """
+
+    def handleError(self, record):
+        try:
+            if self.stream is not None:
+                try:
+                    self.stream.close()
+                except Exception:
+                    pass
+            self.stream = self._open()
+        except Exception:
+            self.stream = None
+
+
+# A logging-handler failure must never crash or flood a trading process.
+logging.raiseExceptions = False
+
+_file_handler = ResilientRotatingFileHandler(
     config.LOG_FILE, maxBytes=50_000_000, backupCount=5,  # 50 MB, 5 backups
 )
 _file_handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s"))
@@ -1195,8 +1222,10 @@ def main():
         except Exception as e:
             console.print(f"[yellow]Failed to load Kalman pairs from DB: {e}[/yellow]")
 
-    # Stop logging to terminal -- dashboard takes over
-    logging.getLogger().removeHandler(_stream_handler)
+    # Dashboard takes over the terminal — quiet the stdout handler to
+    # WARNING instead of removing it, so warnings/errors still reach
+    # docker logs even if the file handler's mount fails (2026-05-07 outage).
+    _stream_handler.setLevel(logging.WARNING)
 
     try:
         with Live(
@@ -1813,7 +1842,9 @@ def main():
                         account = get_account()
                         risk.update_equity(float(account.equity), float(account.cash))
                     except Exception as e:
-                        logger.error(f"Failed to update account: {e}")
+                        from engine.logging_config import log_throttled
+                        log_throttled(logger, logging.ERROR, "main_update_account",
+                                      f"Failed to update account: {e}")
 
                     last_scan = current
 

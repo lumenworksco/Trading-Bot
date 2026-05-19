@@ -112,7 +112,9 @@ def sync_positions_with_broker(risk: RiskManager, now: datetime, ws_monitor=None
     try:
         broker_positions = {p.symbol: p for p in get_positions()}
     except Exception as e:
-        logger.error(f"Failed to fetch positions: {e}")
+        from engine.logging_config import log_throttled
+        log_throttled(logger, logging.ERROR, "broker_sync_fetch_positions",
+                      f"Failed to fetch positions: {e}")
         return
 
     notif = _get_notifications()
@@ -194,6 +196,11 @@ def sync_positions_with_broker(risk: RiskManager, now: datetime, ws_monitor=None
 
             risk.close_trade(symbol, exit_price, now, exit_reason=broker_reason, commission=commission)
             logger.info(f"Position {symbol} confirmed gone from broker — {broker_reason} at ${exit_price:.2f} (entry ${trade.entry_price:.2f})")
+            # Block immediate re-adoption: a position we just confirmed gone can
+            # briefly reappear at the broker (settlement lag), which would
+            # otherwise re-adopt → phantom → cancel in a loop (observed: PFE
+            # 24x). The recent-close cooldown lets broker state settle first.
+            mark_symbol_close_attempted(symbol)
             with _broker_miss_lock:
                 _broker_miss_counts.pop(symbol, None)
 
@@ -249,7 +256,9 @@ def sync_positions_with_broker(risk: RiskManager, now: datetime, ws_monitor=None
             qty = int(float(bp.qty))
             avg_price = float(bp.avg_entry_price)
 
-            recent = database.get_recent_trades(days=1)
+            # Look back several days so a re-adopted position inherits its
+            # real owning strategy instead of the "re-adopted" placeholder.
+            recent = database.get_recent_trades(days=5)
             recent_match = next(
                 (t for t in recent if t["symbol"] == symbol),
                 None,
@@ -318,7 +327,9 @@ def sync_positions_with_broker(risk: RiskManager, now: datetime, ws_monitor=None
         account = get_account()
         risk.update_equity(float(account.equity), float(account.cash))
     except Exception as e:
-        logger.error(f"Failed to update account: {e}")
+        from engine.logging_config import log_throttled
+        log_throttled(logger, logging.ERROR, "broker_sync_update_account",
+                      f"Failed to update account: {e}")
 
 
 def check_shadow_exits(now: datetime):

@@ -73,30 +73,39 @@ class CrossAssetMonitor:
             logger.warning("yfinance not installed — cross-asset signals disabled")
             return
 
-        for key, ticker in INSTRUMENTS.items():
-            try:
-                data = yf.download(
-                    ticker,
-                    period="25d",
-                    interval="1d",
-                    progress=False,
-                    auto_adjust=True,
-                    threads=False,
-                )
-                if data is None or data.empty:
-                    logger.debug("No data returned for %s", ticker)
-                    continue
+        # Suppress yfinance's per-ticker failed-download reporting: a transient
+        # curl timeout otherwise emits raw tracebacks ("'NoneType' object is not
+        # subscriptable"). Fetch failures are handled fail-open in the loop.
+        _yf_logger = logging.getLogger("yfinance")
+        _prev_yf_level = _yf_logger.level
+        _yf_logger.setLevel(logging.CRITICAL)
+        try:
+            for key, ticker in INSTRUMENTS.items():
+                try:
+                    data = yf.download(
+                        ticker,
+                        period="25d",
+                        interval="1d",
+                        progress=False,
+                        auto_adjust=True,
+                        threads=False,
+                    )
+                    if data is None or data.empty:
+                        logger.debug("No data returned for %s", ticker)
+                        continue
 
-                # Flatten MultiIndex columns if present (yfinance >= 0.2.36)
-                if hasattr(data.columns, 'levels') and data.columns.nlevels > 1:
-                    data.columns = data.columns.get_level_values(0)
+                    # Flatten MultiIndex columns if present (yfinance >= 0.2.36)
+                    if hasattr(data.columns, 'levels') and data.columns.nlevels > 1:
+                        data.columns = data.columns.get_level_values(0)
 
-                self._cache[key] = {
-                    "hist": data,
-                    "price": float(data["Close"].iloc[-1]),
-                }
-            except Exception as exc:
-                logger.debug("Failed to fetch %s (%s): %s", key, ticker, exc)
+                    self._cache[key] = {
+                        "hist": data,
+                        "price": float(data["Close"].iloc[-1]),
+                    }
+                except Exception as exc:
+                    logger.debug("Failed to fetch %s (%s): %s", key, ticker, exc)
+        finally:
+            _yf_logger.setLevel(_prev_yf_level)
 
         self._last_update = _time.time()
 

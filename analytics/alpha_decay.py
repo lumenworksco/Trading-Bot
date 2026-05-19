@@ -19,6 +19,13 @@ logger = logging.getLogger(__name__)
 _DEFAULT_CRITICAL_SHARPE = 0.3
 _DEFAULT_WARNING_SHARPE = 0.5
 
+# Labels that appear in the "strategy" column but are not tunable strategies.
+# "re-adopted" is the placeholder assigned to orphan broker positions with no
+# known owning strategy — it has real P&L but cannot be demoted or tuned, so
+# decay-monitoring it emits a daily false CRITICAL alert that drowns out the
+# genuine ones.
+_NON_STRATEGY_LABELS = {"re-adopted", "re-adopt", "unknown", "", "none"}
+
 
 class AlphaDecayMonitor:
     """Monitor alpha decay across strategies using rolling Sharpe analysis."""
@@ -102,6 +109,8 @@ class AlphaDecayMonitor:
 
         strategies = trade_history["strategy"].unique()
         for strat in strategies:
+            if str(strat).strip().lower() in _NON_STRATEGY_LABELS:
+                continue  # skip non-strategy labels (see _NON_STRATEGY_LABELS)
             report[str(strat)] = self.compute_decay(str(strat), trade_history)
 
         return report

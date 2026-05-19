@@ -16,6 +16,7 @@ Usage:
 import logging
 import os
 import time as _time
+import warnings
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -23,6 +24,16 @@ import numpy as np
 import pandas as pd
 
 logger = logging.getLogger(__name__)
+
+# The conformal/ensemble model wrappers call predict_proba() on raw numpy
+# arrays, which makes sklearn/LightGBM emit "X does not have valid feature
+# names". Feature column order is pinned upstream by predict_batch()'s
+# reindex(columns=...), so the positional call is correct and the warning is
+# benign — silence just this one message to keep logs readable.
+warnings.filterwarnings(
+    "ignore",
+    message=".*does not have valid feature names.*",
+)
 
 
 class BatchInferenceEngine:
